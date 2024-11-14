@@ -34,7 +34,8 @@ target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
 
 if(BUILD_TESTING)
   ament_add_ros_isolated_gmock(test_${PROJECT_NAME}_utilities
-  test/test_utils.cpp
+    test/test_utils.cpp
+    test/test_path_utils.cpp
   )
 
   target_link_libraries(test_${PROJECT_NAME}_utilities
@@ -60,6 +61,7 @@ if(BUILD_TESTING)
 
   ament_add_ros_isolated_gmock(test_${PROJECT_NAME}_safety_check
     test/test_safety_check.cpp
+    test/test_objects_filtering.cpp
   )
 
   target_link_libraries(test_${PROJECT_NAME}_safety_check
@@ -74,6 +76,14 @@ if(BUILD_TESTING)
     ${PROJECT_NAME}
   )
 
+  ament_add_ros_isolated_gmock(test_${PROJECT_NAME}_path_shifter
+    test/test_path_shifter.cpp
+  )
+
+  target_link_libraries(test_${PROJECT_NAME}_path_shifter
+    ${PROJECT_NAME}
+  )
+
   ament_add_ros_isolated_gmock(test_${PROJECT_NAME}_turn_signal
     test/test_turn_signal.cpp
   )
@@ -83,4 +93,4 @@ if(BUILD_TESTING)
   )
 endif()
 
-ament_auto_package(INSTALL_TO_SHARE test_map)
+ament_auto_package()
