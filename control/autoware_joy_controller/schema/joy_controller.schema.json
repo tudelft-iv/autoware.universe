@@ -9,8 +9,8 @@
         "joy_type": {
           "type": "string",
           "description": "Joy controller type",
-          "default": "DS4",
-          "enum": ["P65", "DS4", "G29", "XBOX"]
+          "default": "G920",
+          "enum": ["P65", "DS4", "G29", "XBOX", "G920"]
         },
         "update_rate": {
           "type": "number",
@@ -68,7 +68,7 @@
             "max_forward_velocity": {
               "type": "number",
               "description": "Absolute max velocity to go forward",
-              "default": "20.0",
+              "default": "2.0",
               "minimum": 0
             },
             "max_backward_velocity": {
