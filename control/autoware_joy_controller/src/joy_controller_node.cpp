@@ -160,8 +160,8 @@ void AutowareJoyControllerNode::onJoy()
     joy_ = std::make_shared<const G29JoyConverter>(*msg);
   } else if (joy_type_ == "DS4") {
     joy_ = std::make_shared<const DS4JoyConverter>(*msg);
-    else if (joy_type_ == "G920") {
-      joy_ = std::make_shared<const G920JoyConverter>(*msg);
+  } else if (joy_type_ == "G920") {
+    joy_ = std::make_shared<const G920JoyConverter>(*msg);
   } else if (joy_type_ == "XBOX") {
     joy_ = std::make_shared<const XBOXJoyConverter>(*msg);
   } else {
