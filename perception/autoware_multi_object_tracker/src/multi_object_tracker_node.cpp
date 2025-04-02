@@ -188,14 +188,7 @@ MultiObjectTracker::MultiObjectTracker(const rclcpp::NodeOptions & node_options)
   // Data association initialization
   {
     const auto tmp = this->declare_parameter<std::vector<int64_t>>("can_assign_matrix");
-    std::vector<int> can_assign_matrix(tmp.begin(), tmp.end());
-
-    // TODO: This should be taken care of in the config yaml file, but changes were not reflected
-    can_assign_matrix.at(6) = 1;
-    can_assign_matrix.at(7) = 1;
-    can_assign_matrix.at(56) = 1;
-    can_assign_matrix.at(48) = 1;
-
+    const std::vector<int> can_assign_matrix(tmp.begin(), tmp.end());
     const auto max_dist_matrix = this->declare_parameter<std::vector<double>>("max_dist_matrix");
     const auto max_area_matrix = this->declare_parameter<std::vector<double>>("max_area_matrix");
     const auto min_area_matrix = this->declare_parameter<std::vector<double>>("min_area_matrix");
