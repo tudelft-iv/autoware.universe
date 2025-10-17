@@ -65,16 +65,19 @@ const std::map<
   autoware_perception_msgs::msg::ObjectClassification::_label_type, ObjectPropertyValues>
   // Color map is based on cityscapes color
   kDefaultObjectPropertyValues = {
-    {autoware_perception_msgs::msg::ObjectClassification::UNKNOWN, {"UNKNOWN", {255, 255, 255}}},
+    {autoware_perception_msgs::msg::ObjectClassification::UNKNOWN, {"UNKNOWN", {200, 200, 200}}},
     {autoware_perception_msgs::msg::ObjectClassification::CAR, {"CAR", {30, 144, 255}}},
     {autoware_perception_msgs::msg::ObjectClassification::BUS, {"BUS", {30, 144, 255}}},
     {autoware_perception_msgs::msg::ObjectClassification::PEDESTRIAN,
-     {"PEDESTRIAN", {255, 192, 203}}},
-    {autoware_perception_msgs::msg::ObjectClassification::BICYCLE, {"CYCLIST", {119, 11, 32}}},
+     {"PEDESTRIAN", {255, 105, 180}}},
+    {autoware_perception_msgs::msg::ObjectClassification::BICYCLE, {"CYCLIST", {255, 165, 0}}},
     {autoware_perception_msgs::msg::ObjectClassification::MOTORCYCLE,
-     {"MOTORCYCLE", {119, 11, 32}}},
+     {"MOTORCYCLE", {255, 165, 0}}},
     {autoware_perception_msgs::msg::ObjectClassification::TRAILER, {"TRAILER", {30, 144, 255}}},
-    {autoware_perception_msgs::msg::ObjectClassification::TRUCK, {"TRUCK", {30, 144, 255}}}};
+    {autoware_perception_msgs::msg::ObjectClassification::TRUCK, {"TRUCK", {30, 144, 255}}},
+    {autoware_perception_msgs::msg::ObjectClassification::ROBOT_DOG, {"ROBOT_DOG", {0, 255, 127}}},
+    {autoware_perception_msgs::msg::ObjectClassification::STATIC_OBSTACLE, {"STATIC_OBSTACLE", {128, 128, 19}}},
+    {autoware_perception_msgs::msg::ObjectClassification::MOVABLE_OBSTACLE, {"MOVABLE_OBSTACLE", {148, 0, 211}}}};
 
 /// \brief Convert the given polygon into a marker representing the shape in 3d
 /// \param shape_msg Shape msg to be converted. Corners should be in object-local frame

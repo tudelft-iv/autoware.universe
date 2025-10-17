@@ -102,6 +102,12 @@ uint8_t getSemanticType(const std::string & class_name)
     return Label::MOTORCYCLE;
   } else if (class_name == "PEDESTRIAN") {
     return Label::PEDESTRIAN;
+  } else if (class_name == "ROBOT_DOG") {
+    return Label::ROBOT_DOG;
+  } else if (class_name == "STATIC_OBSTACLE") {
+    return Label::STATIC_OBSTACLE;
+  } else if (class_name == "MOVABLE_OBSTACLE") {
+    return Label::MOVABLE_OBSTACLE;
   } else {
     return Label::UNKNOWN;
   }
