@@ -52,6 +52,7 @@ private:
   rclcpp::Publisher<autoware_perception_msgs::msg::DetectedObjects>::SharedPtr objects_pub_;
 
   std::vector<std::string> class_names_;
+  float score_threshold_;
   bool has_variance_{false};
   bool has_twist_{false};
 

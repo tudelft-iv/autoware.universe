@@ -39,7 +39,7 @@ namespace autoware::lidar_centerpoint
 LidarCenterPointNode::LidarCenterPointNode(const rclcpp::NodeOptions & node_options)
 : Node("lidar_center_point", node_options), tf_buffer_(this->get_clock())
 {
-  const float score_threshold =
+  score_threshold_ =
     static_cast<float>(this->declare_parameter<double>("post_process_params.score_threshold"));
   const float circle_nms_dist_threshold = static_cast<float>(
     this->declare_parameter<double>("post_process_params.circle_nms_dist_threshold"));
@@ -103,7 +103,7 @@ LidarCenterPointNode::LidarCenterPointNode(const rclcpp::NodeOptions & node_opti
   }
   CenterPointConfig config(
     class_names_.size(), point_feature_size, cloud_capacity, max_voxel_size, point_cloud_range,
-    voxel_size, downsample_factor, encoder_in_feature_size, score_threshold,
+    voxel_size, downsample_factor, encoder_in_feature_size, score_threshold_,
     circle_nms_dist_threshold, yaw_norm_thresholds, has_variance_);
   detector_ptr_ =
     std::make_unique<CenterPointTRT>(encoder_param, head_param, densification_param, config);
@@ -154,10 +154,16 @@ void LidarCenterPointNode::pointCloudCallback(
   std::vector<autoware_perception_msgs::msg::DetectedObject> raw_objects;
   raw_objects.reserve(det_boxes3d.size());
   for (const auto & box3d : det_boxes3d) {
+    // Hack to avoid detecting trash bins as cars
+    // If it's a car (labell == 0) and score is lower than 2.5 times the score threshold, skip it
+    if (class_names_[box3d.label] == "CAR" && box3d.score < (2.5 * score_threshold_)) {
+      continue;
+    }
     autoware_perception_msgs::msg::DetectedObject obj;
     box3DToDetectedObject(box3d, class_names_, has_twist_, has_variance_, obj);
     raw_objects.emplace_back(obj);
   }
+
 
   autoware_perception_msgs::msg::DetectedObjects output_msg;
   output_msg.header = input_pointcloud_msg->header;
