@@ -36,6 +36,7 @@ GNSSPoser::GNSSPoser(const rclcpp::NodeOptions & node_options)
   use_gnss_ins_orientation_(declare_parameter<bool>("use_gnss_ins_orientation")),
   msg_gnss_ins_orientation_stamped_(
     std::make_shared<autoware_sensing_msgs::msg::GnssInsOrientationStamped>()),
+  msg_gnss_twist_stamped_(std::make_shared<geometry_msgs::msg::TwistWithCovarianceStamped>()),
   gnss_pose_pub_method_(static_cast<int>(declare_parameter<int>("gnss_pose_pub_method")))
 {
   // Subscribe to map_projector_info topic
@@ -57,11 +58,16 @@ GNSSPoser::GNSSPoser(const rclcpp::NodeOptions & node_options)
     create_subscription<autoware_sensing_msgs::msg::GnssInsOrientationStamped>(
       "autoware_orientation", rclcpp::QoS{1},
       std::bind(&GNSSPoser::callback_gnss_ins_orientation_stamped, this, std::placeholders::_1));
+  twist_sub_ = create_subscription<geometry_msgs::msg::TwistWithCovarianceStamped>(
+    "gnss_twist", rclcpp::QoS{1},
+    std::bind(&GNSSPoser::callback_twist, this, std::placeholders::_1));
 
   pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("gnss_pose", rclcpp::QoS{1});
   pose_cov_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
     "gnss_pose_cov", rclcpp::QoS{1});
   fixed_pub_ = create_publisher<tier4_debug_msgs::msg::BoolStamped>("gnss_fixed", rclcpp::QoS{1});
+
+  odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("gnss_odom", rclcpp::QoS{1});
 
   // Set msg_gnss_ins_orientation_stamped_ with temporary values (not to publish zero value
   // covariances)
@@ -204,10 +210,51 @@ void GNSSPoser::callback_nav_sat_fix(
 
   pose_cov_pub_->publish(gnss_base_pose_cov_msg);
 
+  // publish odometry
+  nav_msgs::msg::Odometry odom_in_base_msg{};
+  odom_in_base_msg.header.stamp = msg_gnss_twist_stamped_->header.stamp;
+  odom_in_base_msg.header.frame_id = map_frame_;
+  odom_in_base_msg.child_frame_id = base_frame_;
+  odom_in_base_msg.pose = gnss_base_pose_cov_msg.pose;
+
+  // set twist
+  geometry_msgs::msg::TwistWithCovarianceStamped twist_stamped_in_anntena_frame =
+    *msg_gnss_twist_stamped_;
+
+  twist_stamped_in_anntena_frame.header = msg_gnss_twist_stamped_->header;
+
+  // ToDo: Transform the covariance accordingly
+  twist_stamped_in_anntena_frame.twist.covariance = msg_gnss_twist_stamped_->twist.covariance;
+
+  // transform twist from gnss_antenna frame to base_link frame
+  geometry_msgs::msg::Twist twist_in_base_link_frame{};
+  // The overload expects a TransformStamped, dereference the shared_ptr:
+  if (tf_gnss_antenna2base_link_msg_ptr) {
+    tf2::doTransform(
+      twist_stamped_in_anntena_frame.twist.twist.angular,
+      twist_in_base_link_frame.angular,
+      *tf_gnss_antenna2base_link_msg_ptr); // pass TransformStamped
+
+    tf2::doTransform(
+      twist_stamped_in_anntena_frame.twist.twist.linear,
+      twist_in_base_link_frame.linear,
+      *tf_gnss_antenna2base_link_msg_ptr); // pass TransformStamped
+  }
+
+  // Put the transformed values in the odom msgs
+  odom_in_base_msg.twist.twist = twist_in_base_link_frame;
+  odom_pub_->publish(odom_in_base_msg);
+
   // broadcast map to gnss_base_link
-  publish_tf(map_frame_, gnss_base_frame_, gnss_base_pose_msg);
+  publish_tf(map_frame_, base_frame_, gnss_base_pose_msg);
 }
 
+void GNSSPoser::callback_twist(
+  const geometry_msgs::msg::TwistWithCovarianceStamped::ConstSharedPtr msg)
+{
+  *msg_gnss_twist_stamped_ = *msg;
+
+}
 void GNSSPoser::callback_gnss_ins_orientation_stamped(
   const autoware_sensing_msgs::msg::GnssInsOrientationStamped::ConstSharedPtr msg)
 {
