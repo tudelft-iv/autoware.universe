@@ -34,6 +34,7 @@ GNSSPoser::GNSSPoser(const rclcpp::NodeOptions & node_options)
   gnss_base_frame_(declare_parameter<std::string>("gnss_base_frame")),
   map_frame_(declare_parameter<std::string>("map_frame")),
   use_gnss_ins_orientation_(declare_parameter<bool>("use_gnss_ins_orientation")),
+  publish_map_to_base_link_tf_(declare_parameter<bool>("publish_map_to_base_link_tf")),
   msg_gnss_ins_orientation_stamped_(
     std::make_shared<autoware_sensing_msgs::msg::GnssInsOrientationStamped>()),
   msg_gnss_twist_stamped_(std::make_shared<geometry_msgs::msg::TwistWithCovarianceStamped>()),
@@ -246,7 +247,9 @@ void GNSSPoser::callback_nav_sat_fix(
   odom_pub_->publish(odom_in_base_msg);
 
   // broadcast map to gnss_base_link
-  publish_tf(map_frame_, base_frame_, gnss_base_pose_msg);
+  if (publish_map_to_base_link_tf_){
+    publish_tf(map_frame_, base_frame_, gnss_base_pose_msg);
+  }
 }
 
 void GNSSPoser::callback_twist(

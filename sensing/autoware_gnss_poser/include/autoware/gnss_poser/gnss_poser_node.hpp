@@ -100,6 +100,7 @@ private:
   const std::string map_frame_;
   bool received_map_projector_info_ = false;
   bool use_gnss_ins_orientation_;
+  bool publish_map_to_base_link_tf_;
 
   boost::circular_buffer<geometry_msgs::msg::Point> position_buffer_;
 
