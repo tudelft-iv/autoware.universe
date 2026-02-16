@@ -23,6 +23,8 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <tier4_debug_msgs/msg/bool_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
 
 #include <boost/circular_buffer.hpp>
 
@@ -53,6 +55,7 @@ private:
   void callback_nav_sat_fix(const sensor_msgs::msg::NavSatFix::ConstSharedPtr nav_sat_fix_msg_ptr);
   void callback_gnss_ins_orientation_stamped(
     const autoware_sensing_msgs::msg::GnssInsOrientationStamped::ConstSharedPtr msg);
+  void callback_twist(const geometry_msgs::msg::TwistWithCovarianceStamped::ConstSharedPtr msg);
 
   static bool is_fixed(const sensor_msgs::msg::NavSatStatus & nav_sat_status_msg);
   static bool can_get_covariance(const sensor_msgs::msg::NavSatFix & nav_sat_fix_msg);
@@ -84,10 +87,12 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr nav_sat_fix_sub_;
   rclcpp::Subscription<autoware_sensing_msgs::msg::GnssInsOrientationStamped>::SharedPtr
     autoware_orientation_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr twist_sub_;
 
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_cov_pub_;
   rclcpp::Publisher<tier4_debug_msgs::msg::BoolStamped>::SharedPtr fixed_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
 
   MapProjectorInfo::Message projector_info_;
   const std::string base_frame_;
@@ -95,11 +100,13 @@ private:
   const std::string map_frame_;
   bool received_map_projector_info_ = false;
   bool use_gnss_ins_orientation_;
+  bool publish_map_to_base_link_tf_;
 
   boost::circular_buffer<geometry_msgs::msg::Point> position_buffer_;
 
   autoware_sensing_msgs::msg::GnssInsOrientationStamped::SharedPtr
     msg_gnss_ins_orientation_stamped_;
+  geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg_gnss_twist_stamped_;
   int gnss_pose_pub_method_;
 };
 }  // namespace autoware::gnss_poser
