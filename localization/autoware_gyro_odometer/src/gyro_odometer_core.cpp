@@ -46,6 +46,24 @@ std::array<double, 9> transform_covariance(const std::array<double, 9> & cov)
   return cov_transformed;
 }
 
+std::array<double, 36> transform_covariance(const std::array<double, 36> & cov)
+{
+  using COV_IDX = autoware::universe_utils::xyzrpy_covariance_index::XYZRPY_COV_IDX;
+
+  double max_cov_linear = std::max({cov[COV_IDX::X_X], cov[COV_IDX::Y_Y], cov[COV_IDX::Z_Z]});
+  double max_cov_angular = std::max({cov[COV_IDX::ROLL_ROLL], cov[COV_IDX::PITCH_PITCH], cov[COV_IDX::YAW_YAW]});
+
+  std::array<double, 36> cov_transformed = {};
+  cov_transformed.fill(0.);
+  cov_transformed[COV_IDX::X_X] = max_cov_linear;
+  cov_transformed[COV_IDX::Y_Y] = max_cov_linear;
+  cov_transformed[COV_IDX::Z_Z] = max_cov_linear;
+  cov_transformed[COV_IDX::ROLL_ROLL] = max_cov_angular;
+  cov_transformed[COV_IDX::PITCH_PITCH] = max_cov_angular;
+  cov_transformed[COV_IDX::YAW_YAW] = max_cov_angular;
+  return cov_transformed;
+}
+
 GyroOdometerNode::GyroOdometerNode(const rclcpp::NodeOptions & node_options)
 : Node("gyro_odometer", node_options),
   output_frame_(declare_parameter<std::string>("output_frame")),
@@ -180,6 +198,10 @@ void GyroOdometerNode::concat_gyro_and_odometer()
   geometry_msgs::msg::TransformStamped::ConstSharedPtr tf_imu2base_ptr =
     transform_listener_->getLatestTransform(gyro_queue_.front().header.frame_id, output_frame_);
 
+  // get tf for twist
+  geometry_msgs::msg::TransformStamped::ConstSharedPtr tf_twist2base_ptr =
+    transform_listener_->getLatestTransform(vehicle_twist_queue_.front().header.frame_id, output_frame_);
+
   const bool is_succeed_transform_imu = (tf_imu2base_ptr != nullptr);
   diagnostics_->add_key_value("is_succeed_transform_imu", is_succeed_transform_imu);
   if (!is_succeed_transform_imu) {
@@ -210,20 +232,40 @@ void GyroOdometerNode::concat_gyro_and_odometer()
     gyro.angular_velocity_covariance = transform_covariance(gyro.angular_velocity_covariance);
   }
 
+
+
   using COV_IDX_XYZ = autoware::universe_utils::xyz_covariance_index::XYZ_COV_IDX;
   using COV_IDX_XYZRPY = autoware::universe_utils::xyzrpy_covariance_index::XYZRPY_COV_IDX;
 
   // calc mean, covariance
-  double vx_mean = 0;
+  geometry_msgs::msg::Vector3 twist_mean{};
   geometry_msgs::msg::Vector3 gyro_mean{};
-  double vx_covariance_original = 0;
+  geometry_msgs::msg::Vector3 twist_covariance_original{};
   geometry_msgs::msg::Vector3 gyro_covariance_original{};
-  for (const auto & vehicle_twist : vehicle_twist_queue_) {
-    vx_mean += vehicle_twist.twist.twist.linear.x;
-    vx_covariance_original += vehicle_twist.twist.covariance[0 * 6 + 0];
+  for (auto & vehicle_twist : vehicle_twist_queue_) {
+    geometry_msgs::msg::Vector3Stamped twist_stamped;
+    twist_stamped.header = vehicle_twist.header;
+    twist_stamped.vector = vehicle_twist.twist.twist.linear;
+    geometry_msgs::msg::Vector3Stamped transformed_twist_stamped;
+    tf2::doTransform(twist_stamped, transformed_twist_stamped, *tf_twist2base_ptr);
+
+    vehicle_twist.header.frame_id = output_frame_;
+    vehicle_twist.twist.twist.linear = transformed_twist_stamped.vector;
+    vehicle_twist.twist.covariance = transform_covariance(vehicle_twist.twist.covariance);
+
+    twist_mean.x += vehicle_twist.twist.twist.linear.x;
+    twist_mean.y += vehicle_twist.twist.twist.linear.y;
+    twist_mean.z += vehicle_twist.twist.twist.linear.z;
+    twist_covariance_original.x = vehicle_twist.twist.covariance[COV_IDX_XYZ::X_X];
+    twist_covariance_original.y = vehicle_twist.twist.covariance[COV_IDX_XYZ::Y_Y];
+    twist_covariance_original.z = vehicle_twist.twist.covariance[COV_IDX_XYZ::Z_Z];
   }
-  vx_mean /= static_cast<double>(vehicle_twist_queue_.size());
-  vx_covariance_original /= static_cast<double>(vehicle_twist_queue_.size());
+  twist_mean.x /= static_cast<double>(vehicle_twist_queue_.size());
+  twist_mean.y /= static_cast<double>(vehicle_twist_queue_.size());
+  twist_mean.z /= static_cast<double>(vehicle_twist_queue_.size());
+  twist_covariance_original.x /= static_cast<double>(vehicle_twist_queue_.size());
+  twist_covariance_original.y /= static_cast<double>(vehicle_twist_queue_.size());
+  twist_covariance_original.z /= static_cast<double>(vehicle_twist_queue_.size());
 
   for (const auto & gyro : gyro_queue_) {
     gyro_mean.x += gyro.angular_velocity.x;
@@ -250,15 +292,17 @@ void GyroOdometerNode::concat_gyro_and_odometer()
     twist_with_cov.header.stamp = latest_vehicle_twist_stamp;
   }
   twist_with_cov.header.frame_id = gyro_queue_.front().header.frame_id;
-  twist_with_cov.twist.twist.linear.x = vx_mean;
+  twist_with_cov.twist.twist.linear = twist_mean;
   twist_with_cov.twist.twist.angular = gyro_mean;
 
   // From a statistical point of view, here we reduce the covariances according to the number of
   // observed data
   twist_with_cov.twist.covariance[COV_IDX_XYZRPY::X_X] =
-    vx_covariance_original / static_cast<double>(vehicle_twist_queue_.size());
-  twist_with_cov.twist.covariance[COV_IDX_XYZRPY::Y_Y] = 100000.0;
-  twist_with_cov.twist.covariance[COV_IDX_XYZRPY::Z_Z] = 100000.0;
+    twist_covariance_original.x / static_cast<double>(vehicle_twist_queue_.size());
+  twist_with_cov.twist.covariance[COV_IDX_XYZRPY::Y_Y] =
+    twist_covariance_original.y / static_cast<double>(vehicle_twist_queue_.size());
+  twist_with_cov.twist.covariance[COV_IDX_XYZRPY::Z_Z] =
+    twist_covariance_original.z / static_cast<double>(vehicle_twist_queue_.size());
   twist_with_cov.twist.covariance[COV_IDX_XYZRPY::ROLL_ROLL] =
     gyro_covariance_original.x / static_cast<double>(gyro_queue_.size());
   twist_with_cov.twist.covariance[COV_IDX_XYZRPY::PITCH_PITCH] =
