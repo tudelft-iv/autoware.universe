@@ -18,6 +18,7 @@
 #include "autoware/behavior_path_planner_common/utils/drivable_area_expansion/static_drivable_area.hpp"
 #include "autoware/behavior_path_planner_common/utils/path_utils.hpp"
 
+#include <autoware/lanelet2_utils/nn_search.hpp>
 #include <autoware/motion_utils/trajectory/path_shift.hpp>
 #include <autoware_lanelet2_extension/utility/query.hpp>
 #include <autoware_lanelet2_extension/utility/utilities.hpp>
@@ -30,20 +31,24 @@
 
 namespace autoware::behavior_path_planner
 {
-ShiftPullOver::ShiftPullOver(
-  rclcpp::Node & node, const GoalPlannerParameters & parameters,
-  const LaneDepartureChecker & lane_departure_checker)
+ShiftPullOver::ShiftPullOver(rclcpp::Node & node, const GoalPlannerParameters & parameters)
 : PullOverPlannerBase{node, parameters},
-  lane_departure_checker_{lane_departure_checker},
+  boundary_departure_checker_{[&]() {
+    auto boundary_departure_checker_params = boundary_departure_checker::Param{};
+    boundary_departure_checker_params.footprint_extra_margin =
+      parameters.lane_departure_check_expansion_margin;
+    return BoundaryDepartureChecker{boundary_departure_checker_params, vehicle_info_};
+  }()},
   left_side_parking_{parameters.parking_policy == ParkingPolicy::LEFT_SIDE}
 {
 }
 std::optional<PullOverPath> ShiftPullOver::plan(
   const GoalCandidate & modified_goal_pose, const size_t id,
   const std::shared_ptr<const PlannerData> planner_data,
-  const BehaviorModuleOutput & previous_module_output)
+  const BehaviorModuleOutput & upstream_module_output)
 {
   const auto & route_handler = planner_data->route_handler;
+  const double backward_path_length = planner_data->parameters.backward_path_length;
   const double min_jerk = parameters_.minimum_lateral_jerk;
   const double max_jerk = parameters_.maximum_lateral_jerk;
   const double backward_search_length = parameters_.backward_goal_search_length;
@@ -51,9 +56,9 @@ std::optional<PullOverPath> ShiftPullOver::plan(
   const int shift_sampling_num = parameters_.shift_sampling_num;
   const double jerk_resolution = std::abs(max_jerk - min_jerk) / shift_sampling_num;
 
-  const auto road_lanes = utils::getExtendedCurrentLanesFromPath(
-    previous_module_output.path, planner_data, backward_search_length, forward_search_length,
-    /*forward_only_in_route*/ false);
+  const auto road_lanes = goal_planner_utils::get_reference_lanelets_for_pullover(
+    upstream_module_output.path, planner_data, backward_path_length + backward_search_length,
+    forward_search_length);
 
   const auto pull_over_lanes = goal_planner_utils::getPullOverLanes(
     *route_handler, left_side_parking_, backward_search_length, forward_search_length);
@@ -64,10 +69,10 @@ std::optional<PullOverPath> ShiftPullOver::plan(
   // find safe one from paths with different jerk
   for (double lateral_jerk = min_jerk; lateral_jerk <= max_jerk; lateral_jerk += jerk_resolution) {
     const auto pull_over_path = generatePullOverPath(
-      modified_goal_pose, id, planner_data, previous_module_output, road_lanes, pull_over_lanes,
+      modified_goal_pose, id, planner_data, upstream_module_output, road_lanes, pull_over_lanes,
       lateral_jerk);
     if (!pull_over_path) continue;
-    return *pull_over_path;
+    return pull_over_path;
   }
 
   return {};
@@ -106,35 +111,10 @@ PathWithLaneId ShiftPullOver::generateReferencePath(
   return road_lane_reference_path;
 }
 
-std::optional<PathWithLaneId> ShiftPullOver::cropPrevModulePath(
-  const PathWithLaneId & prev_module_path, const Pose & shift_end_pose) const
-{
-  // clip previous module path to shift end pose nearest segment index
-  const size_t shift_end_idx = autoware::motion_utils::findNearestSegmentIndex(
-    prev_module_path.points, shift_end_pose.position);
-  std::vector<PathPointWithLaneId> clipped_points{
-    prev_module_path.points.begin(), prev_module_path.points.begin() + shift_end_idx};
-  if (clipped_points.empty()) {
-    return std::nullopt;
-  }
-
-  // add projected shift end pose to clipped points
-  PathPointWithLaneId projected_point = clipped_points.back();
-  const double offset = autoware::motion_utils::calcSignedArcLength(
-    prev_module_path.points, shift_end_idx, shift_end_pose.position);
-  projected_point.point.pose =
-    autoware::universe_utils::calcOffsetPose(clipped_points.back().point.pose, offset, 0, 0);
-  clipped_points.push_back(projected_point);
-  auto clipped_prev_module_path = prev_module_path;
-  clipped_prev_module_path.points = clipped_points;
-
-  return clipped_prev_module_path;
-}
-
 std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
   const GoalCandidate & goal_candidate, const size_t id,
   const std::shared_ptr<const PlannerData> planner_data,
-  const BehaviorModuleOutput & previous_module_output, const lanelet::ConstLanelets & road_lanes,
+  const BehaviorModuleOutput & upstream_module_output, const lanelet::ConstLanelets & road_lanes,
   const lanelet::ConstLanelets & pull_over_lanes, const double lateral_jerk) const
 {
   const double pull_over_velocity = parameters_.pull_over_velocity;
@@ -144,14 +124,14 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
 
   // shift end pose is longitudinal offset from goal pose to improve parking angle accuracy
   const Pose shift_end_pose =
-    autoware::universe_utils::calcOffsetPose(goal_pose, -after_shift_straight_distance, 0, 0);
+    autoware_utils::calc_offset_pose(goal_pose, -after_shift_straight_distance, 0, 0);
 
   // calculate lateral shift of previous module path terminal pose from road lane reference path
   const auto road_lane_reference_path_to_shift_end = utils::resamplePathWithSpline(
     generateReferencePath(planner_data, road_lanes, shift_end_pose),
     parameters_.center_line_path_interval);
   const auto prev_module_path = utils::resamplePathWithSpline(
-    previous_module_output.path, parameters_.center_line_path_interval);
+    upstream_module_output.path, parameters_.center_line_path_interval);
   const auto prev_module_path_terminal_pose = prev_module_path.points.back().point.pose;
 
   // process previous module path for path shifter input path
@@ -180,7 +160,7 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
   const Pose & shift_end_pose_prev_module_path =
     processed_prev_module_path->points.back().point.pose;
   const double shift_end_road_to_target_distance =
-    autoware::universe_utils::inverseTransformPoint(
+    autoware_utils::inverse_transform_point(
       shift_end_pose.position, shift_end_pose_prev_module_path)
       .y;
 
@@ -197,6 +177,7 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
   PathShifter path_shifter{};
   path_shifter.setPath(processed_prev_module_path.value());
   ShiftLine shift_line{};
+  if (!shift_start_pose) return std::nullopt;
   shift_line.start = *shift_start_pose;
   shift_line.end = shift_end_pose;
   shift_line.end_shift_length = shift_end_road_to_target_distance;
@@ -233,9 +214,10 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
     PathPointWithLaneId p{};
     p.point.longitudinal_velocity_mps = 0.0;
     p.point.pose = goal_pose;
-    lanelet::Lanelet goal_lanelet{};
-    if (lanelet::utils::query::getClosestLanelet(lanes, goal_pose, &goal_lanelet)) {
-      p.lane_ids = {goal_lanelet.id()};
+    const auto goal_lanelet_opt =
+      autoware::experimental::lanelet2_utils::get_closest_lanelet(lanes, goal_pose);
+    if (goal_lanelet_opt) {
+      p.lane_ids = {goal_lanelet_opt.value().id()};
     } else {
       p.lane_ids = shifted_path.path.points.back().lane_ids;
     }
@@ -243,15 +225,19 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
   }
 
   // set lane_id and velocity to shifted_path
-  for (size_t i = path_shifter.getShiftLines().front().start_idx;
-       i < shifted_path.path.points.size() - 1; ++i) {
+  if (path_shifter.getShiftLines().empty()) {
+    return std::nullopt;
+  }
+  const size_t start_idx = path_shifter.getShiftLines().front().start_idx;
+  for (size_t i = start_idx; i < shifted_path.path.points.size() - 1; ++i) {
     auto & point = shifted_path.path.points.at(i);
     point.point.longitudinal_velocity_mps =
       std::min(point.point.longitudinal_velocity_mps, static_cast<float>(pull_over_velocity));
-    lanelet::Lanelet lanelet{};
-    if (lanelet::utils::query::getClosestLanelet(lanes, point.point.pose, &lanelet)) {
-      point.lane_ids = {lanelet.id()};  // overwrite lane_ids
-    } else {
+    const auto lanelet_opt =
+      autoware::experimental::lanelet2_utils::get_closest_lanelet(lanes, point.point.pose);
+    if (lanelet_opt) {
+      point.lane_ids = {lanelet_opt.value().id()};  // overwrite lane_ids
+    } else if (i > 0) {
       point.lane_ids = shifted_path.path.points.at(i - 1).lane_ids;
     }
   }
@@ -296,13 +282,18 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
 
   const auto departure_check_lane = goal_planner_utils::createDepartureCheckLanelet(
     pull_over_lanes, *planner_data->route_handler, left_side_parking_);
-  const bool is_in_lanes = !lane_departure_checker_.checkPathWillLeaveLane(
-    {departure_check_lane}, pull_over_path.parking_path());
+  // To improve the accuracy of lane departure detection, make the sampling interval finer
+  // todo: Implement lane departure detection that does not depend on the footprint
+  const auto resampled_parking_path = utils::resamplePathWithSpline(
+    pull_over_path.parking_path(), parameters_.center_line_path_interval / 2);
+  const bool is_in_lanes = !boundary_departure_checker_.checkPathWillLeaveLane(
+    {departure_check_lane}, resampled_parking_path);
 
   if (!is_in_parking_lots && !is_in_lanes) {
     return {};
   }
 
+  pull_over_path.debug_processed_prev_module_path = processed_prev_module_path;
   return pull_over_path;
 }
 

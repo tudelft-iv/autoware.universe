@@ -20,23 +20,16 @@
 
 #include <autoware/pointcloud_preprocessor/filter.hpp>
 #include <autoware/pointcloud_preprocessor/transform_info.hpp>
-#include <autoware/universe_utils/system/time_keeper.hpp>
+#include <autoware_utils/system/time_keeper.hpp>
 #include <autoware_vehicle_info_utils/vehicle_info.hpp>
+#include <tf2/transform_datatypes.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
 
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl_conversions/pcl_conversions.h>
-#include <tf2/transform_datatypes.h>
-
-#ifdef ROS_DISTRO_GALACTIC
-#include <tf2_eigen/tf2_eigen.h>
-#else
-#include <tf2_eigen/tf2_eigen.hpp>
-#endif
-
-#include <tf2_ros/transform_listener.h>
 
 #include <algorithm>
 #include <memory>
@@ -150,9 +143,6 @@ private:
     const PointCloud2ConstPtr & input, const IndicesPtr & indices, PointCloud2 & output,
     const autoware::pointcloud_preprocessor::TransformInfo & transform_info) override;
 
-  tf2_ros::Buffer tf_buffer_{get_clock()};
-  tf2_ros::TransformListener tf_listener_{tf_buffer_};
-
   // data accessor
   PclDataAccessor data_accessor_;
 
@@ -181,23 +171,22 @@ private:
 
   // grid mode parameters
   bool use_recheck_ground_cluster_;  // to enable recheck ground cluster
+  float recheck_start_distance_;     // distance to start rechecking ground cluster
   bool use_lowest_point_;  // to select lowest point for reference in recheck ground cluster,
                            // otherwise select middle point
   float detection_range_z_max_;
 
   // grid parameters
   float grid_size_m_;
-  float grid_mode_switch_radius_;  // non linear grid size switching distance
   uint16_t gnd_grid_buffer_size_;
-  float virtual_lidar_z_;
 
   // grid ground filter processor
   std::unique_ptr<GridGroundFilter> grid_ground_filter_ptr_;
 
   // time keeper related
-  rclcpp::Publisher<autoware::universe_utils::ProcessingTimeDetail>::SharedPtr
+  rclcpp::Publisher<autoware_utils::ProcessingTimeDetail>::SharedPtr
     detailed_processing_time_publisher_;
-  std::shared_ptr<autoware::universe_utils::TimeKeeper> time_keeper_;
+  std::shared_ptr<autoware_utils::TimeKeeper> time_keeper_;
 
   /*!
    * Output transformed PointCloud from in_cloud_ptr->header.frame_id to in_target_frame
@@ -254,9 +243,8 @@ private:
     const std::vector<rclcpp::Parameter> & param);
 
   // debugger
-  std::unique_ptr<autoware::universe_utils::StopWatch<std::chrono::milliseconds>> stop_watch_ptr_{
-    nullptr};
-  std::unique_ptr<autoware::universe_utils::DebugPublisher> debug_publisher_ptr_{nullptr};
+  std::unique_ptr<autoware_utils::StopWatch<std::chrono::milliseconds>> stop_watch_ptr_{nullptr};
+  std::unique_ptr<autoware_utils::DebugPublisher> debug_publisher_ptr_{nullptr};
 
 public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW

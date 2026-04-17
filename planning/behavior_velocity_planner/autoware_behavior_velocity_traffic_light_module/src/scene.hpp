@@ -23,8 +23,8 @@
 #define EIGEN_MPL2_ONLY
 #include <Eigen/Core>
 #include <Eigen/Geometry>
-#include <autoware/behavior_velocity_planner_common/scene_module_interface.hpp>
 #include <autoware/behavior_velocity_planner_common/utilization/boost_geometry_helper.hpp>
+#include <autoware/behavior_velocity_rtc_interface/scene_module_interface_with_rtc.hpp>
 #include <autoware_lanelet2_extension/utility/query.hpp>
 #include <rclcpp/rclcpp.hpp>
 
@@ -33,13 +33,18 @@
 
 namespace autoware::behavior_velocity_planner
 {
-class TrafficLightModule : public SceneModuleInterface
+class TrafficLightModule : public SceneModuleInterfaceWithRTC
 {
 public:
   using TrafficSignal = autoware_perception_msgs::msg::TrafficLightGroup;
   using TrafficSignalElement = autoware_perception_msgs::msg::TrafficLightElement;
   using Time = rclcpp::Time;
   enum class State { APPROACH, GO_OUT };
+  enum class YellowState { kNotYellow, kFromGreen, kFromNonGreen };
+  // YellowState represents how the current yellow phase was reached:
+  // - kNotYellow     : not currently in a yellow state.
+  // - kFromGreen     : yellow reached from green; passing through may be allowed.
+  // - kFromNonGreen  : yellow reached from non-green; vehicle is expected to stop.
 
   struct DebugData
   {
@@ -54,6 +59,7 @@ public:
     std::vector<geometry_msgs::msg::Point> traffic_light_points;
     std::optional<geometry_msgs::msg::Point> highest_confidence_traffic_light_point = {
       std::nullopt};
+    bool is_remaining_time_used{false};
   };
 
   struct PlannerParam
@@ -61,15 +67,31 @@ public:
     double stop_margin;
     double tl_state_timeout;
     double yellow_lamp_period;
+    double yellow_light_stop_velocity;
     double stop_time_hysteresis;
     bool enable_pass_judge;
+    // Enable arrow-aware passing logic for yellow signals in turn lanes.
+    bool enable_arrow_aware_yellow_passing;
+    // Restart Suppression Parameter
+    double max_behind_dist_to_stop_for_restart_suppression;
+    double min_behind_dist_to_stop_for_restart_suppression;
+    // V2I Parameter
+    bool v2i_use_remaining_time;
+    double v2i_last_time_allowed_to_pass;
+    double v2i_velocity_threshold;
+    double v2i_required_time_to_departure;
   };
 
 public:
   TrafficLightModule(
     const int64_t lane_id, const lanelet::TrafficLight & traffic_light_reg_elem,
-    lanelet::ConstLanelet lane, const PlannerParam & planner_param, const rclcpp::Logger logger,
-    const rclcpp::Clock::SharedPtr clock);
+    lanelet::ConstLanelet lane, const lanelet::ConstLineString3d & initial_stop_line,
+    // Map based information
+    const bool is_turn_lane, const bool has_static_arrow, const PlannerParam & planner_param,
+    const rclcpp::Logger logger, const rclcpp::Clock::SharedPtr clock,
+    const std::shared_ptr<autoware_utils::TimeKeeper> time_keeper,
+    const std::shared_ptr<planning_factor_interface::PlanningFactorInterface>
+      planning_factor_interface);
 
   bool modifyPathVelocity(PathWithLaneId * path) override;
 
@@ -85,12 +107,14 @@ public:
     return first_ref_stop_path_point_index_;
   }
 
-private:
-  bool isStopSignal();
+  void updateStopLine(const lanelet::ConstLineString3d & stop_line);
 
-  tier4_planning_msgs::msg::PathWithLaneId insertStopPose(
-    const tier4_planning_msgs::msg::PathWithLaneId & input, const size_t & insert_target_point_idx,
-    const Eigen::Vector2d & target_point);
+private:
+  bool willTrafficLightTurnRedBeforeReachingStopLine(const double & distance_to_stop_line) const;
+
+  autoware_internal_planning_msgs::msg::PathWithLaneId insertStopPose(
+    const autoware_internal_planning_msgs::msg::PathWithLaneId & input,
+    const size_t & insert_target_point_idx, const Eigen::Vector2d & target_point);
 
   bool isPassthrough(const double & signed_arc_length) const;
 
@@ -100,12 +124,33 @@ private:
 
   void updateTrafficSignal();
 
+  bool isStopSignal();
+
+  // Store how the current yellow sequence started
+  YellowState yellow_transition_state_;
+
+  TrafficSignal looking_tl_state_;
+  std::optional<Time> traffic_signal_stamp_;
+
+  bool isTrafficSignalYellow() const;
+
+  void updateYellowState(const bool is_yellow_now);
+
   // Lane id
   const int64_t lane_id_;
 
   // Key Feature
   const lanelet::TrafficLight & traffic_light_reg_elem_;
   lanelet::ConstLanelet lane_;
+  lanelet::ConstLineString3d
+    stop_line_;  // Note: this stop_line_ may not be the one bound to the traffic light regulatory
+                 // element. this is the one bound to the traffic light (line string)
+
+  // Map based information
+  // Whether the current lane is a left or right turn lane.
+  const bool is_turn_lane_;
+  // Whether the traffic light has a static arrow bulb defined in the map.
+  const bool has_static_arrow_;
 
   // State
   State state_;
@@ -124,10 +169,10 @@ private:
 
   std::optional<int> first_ref_stop_path_point_index_;
 
-  std::optional<Time> traffic_signal_stamp_;
-
   // Traffic Light State
-  TrafficSignal looking_tl_state_;
+  TrafficSignal prev_looking_tl_state_;  // Store previous state
+
+  friend class TrafficLightModuleTest;
 };
 }  // namespace autoware::behavior_velocity_planner
 

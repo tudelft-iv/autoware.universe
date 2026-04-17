@@ -26,12 +26,12 @@
 #include <memory>
 #include <string>
 
-using autoware::universe_utils::Point2d;
+using autoware_internal_planning_msgs::msg::PathPointWithLaneId;
+using autoware_internal_planning_msgs::msg::PathWithLaneId;
 using autoware_perception_msgs::msg::PredictedObject;
 using autoware_perception_msgs::msg::PredictedObjects;
 using autoware_planning_msgs::msg::Trajectory;
-using tier4_planning_msgs::msg::PathPointWithLaneId;
-using tier4_planning_msgs::msg::PathWithLaneId;
+using autoware_utils::Point2d;
 using ObjectClassification = autoware_perception_msgs::msg::ObjectClassification;
 using autoware::behavior_path_planner::PlannerData;
 using autoware_planning_msgs::msg::LaneletRoute;
@@ -64,8 +64,8 @@ protected:
   void set_route_handler(YAML::Node config)
   {
     const auto route = autoware::test_utils::parse<LaneletRoute>(config["route"]);
-    const auto intersection_map =
-      autoware::test_utils::make_map_bin_msg(autoware::test_utils::get_absolute_path_to_lanelet_map(
+    const auto intersection_map = autoware::test_utils::make_map_bin_msg(
+      autoware::test_utils::get_absolute_path_to_lanelet_map(
         "autoware_test_utils", "intersection/lanelet2_map.osm"));
     planner_data_->route_handler->setMap(intersection_map);
     planner_data_->route_handler->setRoute(route);
@@ -85,11 +85,11 @@ TEST_F(BehaviorPathPlanningUtilTest, l2Norm)
 {
   using autoware::behavior_path_planner::utils::l2Norm;
 
-  geometry_msgs::msg::Vector3 vector = autoware::universe_utils::createVector3(0.0, 0.0, 0.0);
+  geometry_msgs::msg::Vector3 vector = autoware_utils::create_vector3(0.0, 0.0, 0.0);
   auto norm = l2Norm(vector);
   EXPECT_DOUBLE_EQ(norm, 0.0);
 
-  vector = autoware::universe_utils::createVector3(1.0, 2.0, 2.0);
+  vector = autoware_utils::create_vector3(1.0, 2.0, 2.0);
   norm = l2Norm(vector);
   EXPECT_DOUBLE_EQ(norm, 3.0);
 }
@@ -98,7 +98,7 @@ TEST_F(BehaviorPathPlanningUtilTest, checkCollisionBetweenPathFootprintsAndObjec
 {
   using autoware::behavior_path_planner::utils::checkCollisionBetweenPathFootprintsAndObjects;
 
-  autoware::universe_utils::LinearRing2d base_footprint = {
+  autoware_utils::LinearRing2d base_footprint = {
     Point2d{1.0, 1.0}, Point2d{1.0, -1.0}, Point2d{-1.0, -1.0}, Point2d{-1.0, 1.0},
     Point2d{1.0, -1.0}};
   double margin = 0.2;
@@ -132,7 +132,7 @@ TEST_F(BehaviorPathPlanningUtilTest, checkCollisionBetweenFootprintAndObjects)
   using autoware::behavior_path_planner::utils::checkCollisionBetweenFootprintAndObjects;
 
   auto ego_pose = createPose(1.0, 1.0, 0.0, 0.0, 0.0, 0.0);
-  autoware::universe_utils::LinearRing2d base_footprint = {
+  autoware_utils::LinearRing2d base_footprint = {
     Point2d{1.0, 1.0}, Point2d{1.0, -1.0}, Point2d{-1.0, -1.0}, Point2d{-1.0, 1.0},
     Point2d{1.0, -1.0}};
   double margin = 0.2;
@@ -269,13 +269,19 @@ TEST_F(BehaviorPathPlanningUtilTest, refinePathForGoal)
 
   auto path = generateTrajectory<PathWithLaneId>(10, 1.0, 3.0);
   const double search_rad_range = M_PI;
+  const double output_path_interval = 2.0;
   const auto goal_pose = createPose(5.2, 0.0, 0.0, 0.0, 0.0, 0.0);
   const int64_t goal_lane_id = 5;
   {
     const double search_radius_range = 1.0;
-    const auto refined_path =
-      refinePathForGoal(search_radius_range, search_rad_range, path, goal_pose, goal_lane_id);
-    EXPECT_EQ(refined_path.points.size(), 7);
+    const auto refined_path = refinePathForGoal(
+      search_radius_range, search_rad_range, output_path_interval, path, goal_pose, goal_lane_id,
+      [&](int64_t lane_id) -> lanelet::ConstLanelet {
+        return {
+          lane_id, lanelet::LineString3d(lanelet::utils::getId()),
+          lanelet::LineString3d(lanelet::utils::getId())};
+      });
+    EXPECT_EQ(refined_path.points.size(), 8);
     EXPECT_DOUBLE_EQ(refined_path.points.back().point.longitudinal_velocity_mps, 0.0);
     EXPECT_DOUBLE_EQ(refined_path.points.back().point.pose.position.x, 5.2);
   }
@@ -460,12 +466,14 @@ TEST_F(BehaviorPathPlanningUtilTest, getHighestProbLabel)
   EXPECT_EQ(getHighestProbLabel(obj.classification), ObjectClassification::Type::UNKNOWN);
 
   // Condition: with 2 label
-  obj.classification.emplace_back(autoware_perception_msgs::build<ObjectClassification>()
-                                    .label(ObjectClassification::CAR)
-                                    .probability(0.4));
-  obj.classification.emplace_back(autoware_perception_msgs::build<ObjectClassification>()
-                                    .label(ObjectClassification::TRUCK)
-                                    .probability(0.6));
+  obj.classification.emplace_back(
+    autoware_perception_msgs::build<ObjectClassification>()
+      .label(ObjectClassification::CAR)
+      .probability(0.4));
+  obj.classification.emplace_back(
+    autoware_perception_msgs::build<ObjectClassification>()
+      .label(ObjectClassification::TRUCK)
+      .probability(0.6));
   EXPECT_EQ(getHighestProbLabel(obj.classification), ObjectClassification::Type::TRUCK);
 }
 

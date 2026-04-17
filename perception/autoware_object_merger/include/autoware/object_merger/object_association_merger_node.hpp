@@ -16,32 +16,28 @@
 #define AUTOWARE__OBJECT_MERGER__OBJECT_ASSOCIATION_MERGER_NODE_HPP_
 
 #include "autoware/object_merger/association/data_association.hpp"
-#include "autoware/universe_utils/ros/debug_publisher.hpp"
-#include "autoware/universe_utils/ros/published_time_publisher.hpp"
-#include "autoware/universe_utils/system/stop_watch.hpp"
+#include "autoware_utils/ros/debug_publisher.hpp"
+#include "autoware_utils/ros/published_time_publisher.hpp"
+#include "autoware_utils/system/stop_watch.hpp"
 
+#include <autoware_utils/ros/diagnostics_interface.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <tf2/LinearMath/Transform.hpp>
+#include <tf2/convert.hpp>
+#include <tf2/transform_datatypes.hpp>
 
 #include "autoware_perception_msgs/msg/detected_objects.hpp"
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/approximate_time.h>
 #include <message_filters/synchronizer.h>
-#include <tf2/LinearMath/Transform.h>
-#include <tf2/convert.h>
-#include <tf2/transform_datatypes.h>
-
-#ifdef ROS_DISTRO_GALACTIC
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
-#else
-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#endif
-
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -49,14 +45,18 @@ namespace autoware::object_merger
 {
 class ObjectAssociationMergerNode : public rclcpp::Node
 {
+  using Label = autoware_perception_msgs::msg::ObjectClassification;
+
 public:
   explicit ObjectAssociationMergerNode(const rclcpp::NodeOptions & node_options);
-  enum class PriorityMode : int { Object0 = 0, Object1 = 1, Confidence = 2 };
+  enum class PriorityMode : int { Object0 = 0, Object1 = 1, Confidence = 2, ClassBased = 3 };
 
 private:
   void objectsCallback(
     const autoware_perception_msgs::msg::DetectedObjects::ConstSharedPtr & input_objects0_msg,
     const autoware_perception_msgs::msg::DetectedObjects::ConstSharedPtr & input_objects1_msg);
+
+  void diagCallback();
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
@@ -73,7 +73,19 @@ private:
   std::unique_ptr<DataAssociation> data_association_;
   std::string base_link_frame_id_;  // associated with the base_link frame
 
+  // Timeout Related
+  double message_timeout_sec_;
+  double initialization_timeout_sec_;
+  std::optional<rclcpp::Time> last_sync_time_;
+  std::optional<double> message_interval_;
+  rclcpp::TimerBase::SharedPtr timeout_timer_;
+  std::unique_ptr<autoware_utils::DiagnosticsInterface> diagnostics_interface_ptr_;
+
   PriorityMode priority_mode_;
+  std::vector<int64_t> class_based_priority_matrix_;
+
+  int NUMBER_OF_CLASSES_;
+
   bool remove_overlapped_unknown_objects_;
   struct
   {
@@ -84,10 +96,10 @@ private:
   } overlapped_judge_param_;
 
   // debug publisher
-  std::unique_ptr<autoware::universe_utils::DebugPublisher> processing_time_publisher_;
-  std::unique_ptr<autoware::universe_utils::StopWatch<std::chrono::milliseconds>> stop_watch_ptr_;
+  std::unique_ptr<autoware_utils::DebugPublisher> processing_time_publisher_;
+  std::unique_ptr<autoware_utils::StopWatch<std::chrono::milliseconds>> stop_watch_ptr_;
 
-  std::unique_ptr<autoware::universe_utils::PublishedTimePublisher> published_time_publisher_;
+  std::unique_ptr<autoware_utils::PublishedTimePublisher> published_time_publisher_;
 };
 }  // namespace autoware::object_merger
 

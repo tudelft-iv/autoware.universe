@@ -18,8 +18,9 @@
 #include "map_based_prediction/data_structure.hpp"
 
 #include <Eigen/Eigen>
-#include <autoware/universe_utils/system/time_keeper.hpp>
+#include <autoware_utils/system/time_keeper.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <tf2/LinearMath/Quaternion.hpp>
 
 #include <autoware_perception_msgs/msg/predicted_objects.hpp>
 #include <autoware_perception_msgs/msg/tracked_objects.hpp>
@@ -29,10 +30,7 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
-#include <tf2/LinearMath/Quaternion.h>
-
 #include <memory>
-#include <utility>
 #include <vector>
 
 namespace autoware::map_based_prediction
@@ -81,6 +79,11 @@ struct CrosswalkEdgePoints
   }
 };
 
+struct PredictedPathWithArrivalIndex : PredictedPath
+{
+  size_t arrival_index{};
+};
+
 using FrenetPath = std::vector<FrenetPoint>;
 
 class PathGenerator
@@ -89,7 +92,7 @@ public:
   explicit PathGenerator(const double sampling_time_interval);
   PathGenerator(const double sampling_time_interval, const double min_crosswalk_user_velocity);
 
-  void setTimeKeeper(std::shared_ptr<autoware::universe_utils::TimeKeeper> time_keeper_ptr);
+  void setTimeKeeper(std::shared_ptr<autoware_utils::TimeKeeper> time_keeper_ptr);
 
   PredictedPath generatePathForNonVehicleObject(
     const TrackedObject & object, const double duration) const;
@@ -105,7 +108,7 @@ public:
     const double lateral_duration, const double path_width = 0.0,
     const double speed_limit = 0.0) const;
 
-  PredictedPath generatePathForCrosswalkUser(
+  [[nodiscard]] PredictedPathWithArrivalIndex generatePathForCrosswalkUser(
     const TrackedObject & object, const CrosswalkEdgePoints & reachable_crosswalk,
     const double duration) const;
 
@@ -129,7 +132,7 @@ private:
   bool use_vehicle_acceleration_;
   double acceleration_exponential_half_life_;
 
-  std::shared_ptr<autoware::universe_utils::TimeKeeper> time_keeper_;
+  std::shared_ptr<autoware_utils::TimeKeeper> time_keeper_;
 
   // Member functions
   PredictedPath generateStraightPath(const TrackedObject & object, const double duration) const;

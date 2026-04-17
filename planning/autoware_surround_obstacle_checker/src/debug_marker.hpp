@@ -15,11 +15,14 @@
 #ifndef DEBUG_MARKER_HPP_
 #define DEBUG_MARKER_HPP_
 
+#include "type_alias.hpp"
+#include "types.hpp"
+
+#include <autoware/planning_factor_interface/planning_factor_interface.hpp>
 #include <autoware_vehicle_info_utils/vehicle_info_utils.hpp>
 #include <rclcpp/rclcpp.hpp>
 
-#include <autoware_adapi_v1_msgs/msg/planning_behavior.hpp>
-#include <autoware_adapi_v1_msgs/msg/velocity_factor_array.hpp>
+#include <autoware_internal_planning_msgs/msg/planning_factor_array.hpp>
 #include <geometry_msgs/msg/polygon_stamped.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <visualization_msgs/msg/marker.hpp>
@@ -32,14 +35,6 @@
 
 namespace autoware::surround_obstacle_checker
 {
-
-using autoware::vehicle_info_utils::VehicleInfo;
-using autoware_adapi_v1_msgs::msg::PlanningBehavior;
-using autoware_adapi_v1_msgs::msg::VelocityFactor;
-using autoware_adapi_v1_msgs::msg::VelocityFactorArray;
-using geometry_msgs::msg::PolygonStamped;
-using visualization_msgs::msg::Marker;
-using visualization_msgs::msg::MarkerArray;
 
 namespace bg = boost::geometry;
 using Point2d = bg::model::d2::point_xy<double>;
@@ -59,17 +54,19 @@ public:
     const rclcpp::Clock::SharedPtr clock, rclcpp::Node & node);
 
   bool pushPose(const geometry_msgs::msg::Pose & pose, const PoseType & type);
-  bool pushObstaclePoint(const geometry_msgs::msg::Point & obstacle_point, const PointType & type);
+  void pushStopObstacle(const std::optional<StopObstacle> & stop_obstacle);
   void publish();
   void publishFootprints();
 
 private:
   rclcpp::Publisher<MarkerArray>::SharedPtr debug_viz_pub_;
-  rclcpp::Publisher<VelocityFactorArray>::SharedPtr velocity_factor_pub_;
 
   rclcpp::Publisher<PolygonStamped>::SharedPtr vehicle_footprint_pub_;
   rclcpp::Publisher<PolygonStamped>::SharedPtr vehicle_footprint_offset_pub_;
   rclcpp::Publisher<PolygonStamped>::SharedPtr vehicle_footprint_recover_offset_pub_;
+
+  std::unique_ptr<autoware::planning_factor_interface::PlanningFactorInterface>
+    planning_factor_interface_;
 
   autoware::vehicle_info_utils::VehicleInfo vehicle_info_;
   std::string object_label_;
@@ -80,11 +77,10 @@ private:
   geometry_msgs::msg::Pose self_pose_;
 
   MarkerArray makeVisualizationMarker();
-  VelocityFactorArray makeVelocityFactorArray();
 
   PolygonStamped boostPolygonToPolygonStamped(const Polygon2d & boost_polygon, const double & z);
 
-  std::shared_ptr<geometry_msgs::msg::Point> stop_obstacle_point_ptr_;
+  std::optional<StopObstacle> stop_obstacle_;
   std::shared_ptr<geometry_msgs::msg::Pose> stop_pose_ptr_;
   rclcpp::Clock::SharedPtr clock_;
 };

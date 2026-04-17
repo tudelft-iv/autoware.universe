@@ -183,12 +183,17 @@ AvoidOutlines ShiftLineGenerator::generateAvoidOutline(
       return std::nullopt;
     }
 
+    if (object.is_avoidable_by_desired_shift_length) {
+      return std::make_pair(desire_shift_length, avoidance_distance);
+    }
+
     // calculate lateral jerk.
     const auto required_jerk = autoware::motion_utils::calc_jerk_from_lat_lon_distance(
       avoiding_shift, avoidance_distance, helper_->getAvoidanceEgoSpeed());
 
     // relax lateral jerk limit. avoidable.
     if (required_jerk < helper_->getLateralMaxJerkLimit()) {
+      object.is_avoidable_by_desired_shift_length = true;
       return std::make_pair(desire_shift_length, avoidance_distance);
     }
 
@@ -264,9 +269,9 @@ AvoidOutlines ShiftLineGenerator::generateAvoidOutline(
   AvoidOutlines outlines;
   for (auto & o : data.target_objects) {
     if (!o.avoid_margin.has_value()) {
-      if (!data.red_signal_lane.has_value()) {
-        o.info = ObjectInfo::INSUFFICIENT_DRIVABLE_SPACE;
-      } else if (data.red_signal_lane.value().id() == o.overhang_lanelet.id()) {
+      if (
+        data.red_signal_lane.has_value() &&
+        data.red_signal_lane.value().id() == o.overhang_lanelet.id()) {
         o.info = ObjectInfo::LIMIT_DRIVABLE_SPACE_TEMPORARY;
       } else {
         o.info = ObjectInfo::INSUFFICIENT_DRIVABLE_SPACE;
@@ -320,7 +325,7 @@ AvoidOutlines ShiftLineGenerator::generateAvoidOutline(
 
     // use absolute dist for return-to-center, relative dist from current for avoiding.
     const auto feasible_return_distance =
-      helper_->getMaxAvoidanceDistance(feasible_shift_profile.value().first);
+      helper_->getMaxReturnDistance(feasible_shift_profile.value().first);
 
     AvoidLine al_avoid;
     {
@@ -350,11 +355,20 @@ AvoidOutlines ShiftLineGenerator::generateAvoidOutline(
       al_avoid.start_shift_length = helper_->getLinearShift(al_avoid.start.position);
 
       // end point
-      al_avoid.end_shift_length = feasible_shift_profile.value().first;
+      const auto end_idx = utils::static_obstacle_avoidance::findPathIndexFromArclength(
+        data.arclength_from_ego, to_shift_end);
+      const auto end = data.reference_path.points.at(end_idx).point.pose;
+      if (utils::static_obstacle_avoidance::isOnRight(o)) {
+        al_avoid.end_shift_length =
+          std::max(feasible_shift_profile.value().first, helper_->getLinearShift(end.position));
+      } else {
+        al_avoid.end_shift_length =
+          std::min(feasible_shift_profile.value().first, helper_->getLinearShift(end.position));
+      }
       al_avoid.end_longitudinal = to_shift_end;
 
       // misc
-      al_avoid.id = generateUUID();
+      al_avoid.id = generate_uuid();
       al_avoid.object = o;
       al_avoid.object_on_right = utils::static_obstacle_avoidance::isOnRight(o);
     }
@@ -365,7 +379,7 @@ AvoidOutlines ShiftLineGenerator::generateAvoidOutline(
       const auto to_shift_start = o.longitudinal + constant_distance;
 
       // start point
-      al_return.start_shift_length = feasible_shift_profile.value().first;
+      al_return.start_shift_length = al_avoid.end_shift_length;
       al_return.start_longitudinal = to_shift_start;
 
       // end point
@@ -380,7 +394,7 @@ AvoidOutlines ShiftLineGenerator::generateAvoidOutline(
       al_return.end_shift_length = 0.0;
 
       // misc
-      al_return.id = generateUUID();
+      al_return.id = generate_uuid();
       al_return.object = o;
       al_return.object_on_right = utils::static_obstacle_avoidance::isOnRight(o);
     }
@@ -399,7 +413,7 @@ AvoidOutlines ShiftLineGenerator::generateAvoidOutline(
         return true;
       }
       const bool has_object_near_goal =
-        autoware::universe_utils::calcDistance2d(goal_pose.position, o.getPosition()) <
+        autoware_utils::calc_distance2d(goal_pose.position, o.getPosition()) <
         parameters_->object_check_goal_distance;
       return has_object_near_goal;
     }();
@@ -579,7 +593,7 @@ void ShiftLineGenerator::generateTotalShiftLine(
                                      avoid_lines.front().start_longitudinal;
 
   for (size_t i = data.ego_closest_path_index; i <= avoid_lines.front().start_idx; ++i) {
-    sl.shift_line.at(i) = helper_->getLinearShift(getPoint(path.points.at(i)));
+    sl.shift_line.at(i) = helper_->getLinearShift(get_point(path.points.at(i)));
     sl.shift_line_grad.at(i) = grad_first_shift_line;
   }
 
@@ -658,7 +672,7 @@ AvoidLineArray ShiftLineGenerator::extractShiftLinesFromLine(
       found_first_start = true;
     } else {
       setEndData(al, shift, p, i, arcs.at(i));
-      al.id = generateUUID();
+      al.id = generate_uuid();
       merged_avoid_lines.push_back(al);
       setStartData(al, 0.0, p, i, arcs.at(i));  // start length is overwritten later.
     }
@@ -668,7 +682,7 @@ AvoidLineArray ShiftLineGenerator::extractShiftLinesFromLine(
     const auto & p = path.points.at(N - 1).point.pose;
     const auto shift = sl.shift_line.at(N - 1);
     setEndData(al, shift, p, N - 1, arcs.at(N - 1));
-    al.id = generateUUID();
+    al.id = generate_uuid();
     merged_avoid_lines.push_back(al);
   }
 
@@ -714,7 +728,7 @@ AvoidOutlines ShiftLineGenerator::applyMergeProcess(
       continue;
     }
 
-    const auto merged_shift_line = merge(return_line.value(), avoid_line, generateUUID());
+    const auto merged_shift_line = merge(return_line.value(), avoid_line, generate_uuid());
 
     if (!helper_->isComfortable(AvoidLineArray{merged_shift_line})) {
       ret.push_back(outlines.at(i));
@@ -763,7 +777,7 @@ AvoidOutlines ShiftLineGenerator::applyFillGapProcess(
     if (outline.middle_lines.empty()) {
       const auto new_line =
         outline.return_line.has_value()
-          ? fill(outline.avoid_line, outline.return_line.value(), generateUUID())
+          ? fill(outline.avoid_line, outline.return_line.value(), generate_uuid())
           : outline.avoid_line;
       outline.middle_lines.push_back(new_line);
       debug.step1_filled_shift_line.push_back(new_line);
@@ -772,7 +786,7 @@ AvoidOutlines ShiftLineGenerator::applyFillGapProcess(
     helper_->alignShiftLinesOrder(outline.middle_lines, false);
 
     if (outline.avoid_line.end_longitudinal < outline.middle_lines.front().start_longitudinal) {
-      const auto new_line = fill(outline.avoid_line, outline.middle_lines.front(), generateUUID());
+      const auto new_line = fill(outline.avoid_line, outline.middle_lines.front(), generate_uuid());
       outline.middle_lines.push_back(new_line);
       debug.step1_filled_shift_line.push_back(new_line);
     }
@@ -783,7 +797,7 @@ AvoidOutlines ShiftLineGenerator::applyFillGapProcess(
       outline.return_line.has_value() &&
       outline.middle_lines.back().end_longitudinal < outline.return_line->start_longitudinal) {
       const auto new_line =
-        fill(outline.middle_lines.back(), outline.return_line.value(), generateUUID());
+        fill(outline.middle_lines.back(), outline.return_line.value(), generate_uuid());
       outline.middle_lines.push_back(new_line);
       debug.step1_filled_shift_line.push_back(new_line);
     }
@@ -818,7 +832,7 @@ AvoidLineArray ShiftLineGenerator::applyFillGapProcess(
       ego_line, helper_->getEgoLinearShift(), data.reference_pose, data.ego_closest_path_index,
       0.0);
 
-    const auto new_line = fill(ego_line, sorted.front(), generateUUID());
+    const auto new_line = fill(ego_line, sorted.front(), generate_uuid());
     ret.push_back(new_line);
     debug.step1_front_shift_line.push_back(new_line);
   }
@@ -831,7 +845,7 @@ AvoidLineArray ShiftLineGenerator::applyFillGapProcess(
       continue;
     }
 
-    const auto new_line = fill(sorted.at(i), sorted.at(i + 1), generateUUID());
+    const auto new_line = fill(sorted.at(i), sorted.at(i + 1), generate_uuid());
     ret.push_back(new_line);
     debug.step1_front_shift_line.push_back(new_line);
   }
@@ -1060,7 +1074,7 @@ AvoidLineArray ShiftLineGenerator::addReturnShiftLine(
   if (utils::isAllowedGoalModification(data_->route_handler)) {
     const auto has_object_near_goal =
       std::any_of(data.target_objects.begin(), data.target_objects.end(), [&](const auto & o) {
-        return autoware::universe_utils::calcDistance2d(
+        return autoware_utils::calc_distance2d(
                  data_->route_handler->getGoalPose().position, o.getPosition()) <
                parameters_->object_check_goal_distance;
       });
@@ -1130,7 +1144,7 @@ AvoidLineArray ShiftLineGenerator::addReturnShiftLine(
   if (utils::isAllowedGoalModification(data_->route_handler)) {
     const bool has_last_shift_near_goal =
       std::any_of(data.target_objects.begin(), data.target_objects.end(), [&](const auto & o) {
-        return autoware::universe_utils::calcDistance2d(last_sl.end.position, o.getPosition()) <
+        return autoware_utils::calc_distance2d(last_sl.end.position, o.getPosition()) <
                parameters_->object_check_goal_distance;
       });
     if (has_last_shift_near_goal) {
@@ -1176,7 +1190,7 @@ AvoidLineArray ShiftLineGenerator::addReturnShiftLine(
   const auto & arclength_from_ego = data.arclength_from_ego;
 
   const auto nominal_prepare_distance = helper_->getNominalPrepareDistance();
-  const auto nominal_avoid_distance = helper_->getMaxAvoidanceDistance(last_sl.end_shift_length);
+  const auto nominal_avoid_distance = helper_->getMaxReturnDistance(last_sl.end_shift_length);
 
   if (arclength_from_ego.empty()) {
     return ret;
@@ -1230,7 +1244,7 @@ AvoidLineArray ShiftLineGenerator::addReturnShiftLine(
   // shift point for prepare distance: from last shift to return-start point.
   if (nominal_prepare_distance > last_sl_distance) {
     AvoidLine al;
-    al.id = generateUUID();
+    al.id = generate_uuid();
     al.start_idx = last_sl.end_idx;
     al.start = last_sl.end;
     al.start_longitudinal = arclength_from_ego.at(al.start_idx);
@@ -1247,7 +1261,7 @@ AvoidLineArray ShiftLineGenerator::addReturnShiftLine(
   // shift point for return to center line
   {
     AvoidLine al;
-    al.id = generateUUID();
+    al.id = generate_uuid();
     al.start_idx = utils::static_obstacle_avoidance::findPathIndexFromArclength(
       arclength_from_ego, prepare_distance_scaled);
     al.start = data.reference_path.points.at(al.start_idx).point.pose;

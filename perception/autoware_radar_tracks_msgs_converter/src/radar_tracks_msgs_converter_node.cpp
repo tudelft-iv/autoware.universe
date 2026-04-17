@@ -14,17 +14,13 @@
 
 #include "radar_tracks_msgs_converter_node.hpp"
 
-#include "autoware/universe_utils/geometry/geometry.hpp"
-#include "autoware/universe_utils/math/unit_conversion.hpp"
-#include "autoware/universe_utils/ros/msg_covariance.hpp"
+#include "autoware_utils/geometry/geometry.hpp"
+#include "autoware_utils/math/unit_conversion.hpp"
+#include "autoware_utils/ros/msg_covariance.hpp"
 
-#include <tf2/utils.h>
+#include <tf2/utils.hpp>
 
-#ifdef ROS_DISTRO_GALACTIC
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
-#else
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#endif
 
 #include <memory>
 #include <string>
@@ -34,7 +30,6 @@ using namespace std::literals;
 using std::chrono::duration;
 using std::chrono::duration_cast;
 using std::chrono::nanoseconds;
-using std::placeholders::_1;
 
 namespace
 {
@@ -73,6 +68,7 @@ enum class RadarTrackObjectID {
 RadarTracksMsgsConverterNode::RadarTracksMsgsConverterNode(const rclcpp::NodeOptions & node_options)
 : Node("radar_tracks_msgs_converter", node_options)
 {
+  using std::placeholders::_1;
   // Parameter Server
   set_param_res_ = this->add_on_set_parameters_callback(
     std::bind(&RadarTracksMsgsConverterNode::onSetParam, this, _1));
@@ -92,7 +88,7 @@ RadarTracksMsgsConverterNode::RadarTracksMsgsConverterNode(const rclcpp::NodeOpt
   sub_odometry_ = create_subscription<Odometry>(
     "~/input/odometry", rclcpp::QoS{1},
     std::bind(&RadarTracksMsgsConverterNode::onTwist, this, _1));
-  transform_listener_ = std::make_shared<autoware::universe_utils::TransformListener>(this);
+  transform_listener_ = std::make_shared<autoware_utils::TransformListener>(this);
 
   // Publisher
   pub_tracked_objects_ = create_publisher<TrackedObjects>("~/output/radar_tracked_objects", 1);
@@ -158,15 +154,13 @@ void RadarTracksMsgsConverterNode::onTimer()
     return;
   }
   const auto & header = radar_data_->header;
-  transform_ = transform_listener_->getTransform(
+  transform_ = transform_listener_->get_transform(
     node_param_.new_frame_id, header.frame_id, header.stamp, rclcpp::Duration::from_seconds(0.01));
 
   TrackedObjects tracked_objects = convertRadarTrackToTrackedObjects();
   DetectedObjects detected_objects = convertTrackedObjectsToDetectedObjects(tracked_objects);
-  if (!tracked_objects.objects.empty()) {
-    pub_tracked_objects_->publish(tracked_objects);
-    pub_detected_objects_->publish(detected_objects);
-  }
+  pub_tracked_objects_->publish(tracked_objects);
+  pub_detected_objects_->publish(detected_objects);
 }
 
 DetectedObjects RadarTracksMsgsConverterNode::convertTrackedObjectsToDetectedObjects(
@@ -261,8 +255,8 @@ TrackedObjects RadarTracksMsgsConverterNode::convertRadarTrackToTrackedObjects()
     }
 
     // yaw angle (vehicle heading) is obtained from ground velocity
-    double yaw = autoware::universe_utils::normalizeRadian(
-      std::atan2(compensated_velocity.y, compensated_velocity.x));
+    double yaw =
+      autoware_utils::normalize_radian(std::atan2(compensated_velocity.y, compensated_velocity.x));
 
     // kinematics setting
     TrackedObjectKinematics kinematics;
@@ -273,7 +267,7 @@ TrackedObjects RadarTracksMsgsConverterNode::convertRadarTrackToTrackedObjects()
     // velocity of object is defined in the object coordinate
     // heading is obtained from ground velocity
     kinematics.pose_with_covariance.pose.orientation =
-      autoware::universe_utils::createQuaternionFromYaw(yaw);
+      autoware_utils::create_quaternion_from_yaw(yaw);
     // longitudinal velocity is the length of the velocity vector
     // lateral velocity is zero, use default value
     kinematics.twist_with_covariance.twist.linear.x = std::sqrt(
@@ -334,8 +328,8 @@ geometry_msgs::msg::Vector3 RadarTracksMsgsConverterNode::compensateVelocityEgoM
 std::array<double, 36> RadarTracksMsgsConverterNode::convertPoseCovarianceMatrix(
   const radar_msgs::msg::RadarTrack & radar_track)
 {
-  using POSE_IDX = autoware::universe_utils::xyzrpy_covariance_index::XYZRPY_COV_IDX;
-  using RADAR_IDX = autoware::universe_utils::xyz_upper_covariance_index::XYZ_UPPER_COV_IDX;
+  using POSE_IDX = autoware_utils::xyzrpy_covariance_index::XYZRPY_COV_IDX;
+  using RADAR_IDX = autoware_utils::xyz_upper_covariance_index::XYZ_UPPER_COV_IDX;
   std::array<double, 36> pose_covariance{};
   pose_covariance[POSE_IDX::X_X] = radar_track.position_covariance[RADAR_IDX::X_X];
   pose_covariance[POSE_IDX::X_Y] = radar_track.position_covariance[RADAR_IDX::X_Y];
@@ -351,8 +345,8 @@ std::array<double, 36> RadarTracksMsgsConverterNode::convertPoseCovarianceMatrix
 std::array<double, 36> RadarTracksMsgsConverterNode::convertTwistCovarianceMatrix(
   const radar_msgs::msg::RadarTrack & radar_track)
 {
-  using POSE_IDX = autoware::universe_utils::xyzrpy_covariance_index::XYZRPY_COV_IDX;
-  using RADAR_IDX = autoware::universe_utils::xyz_upper_covariance_index::XYZ_UPPER_COV_IDX;
+  using POSE_IDX = autoware_utils::xyzrpy_covariance_index::XYZRPY_COV_IDX;
+  using RADAR_IDX = autoware_utils::xyz_upper_covariance_index::XYZ_UPPER_COV_IDX;
   std::array<double, 36> twist_covariance{};
   twist_covariance[POSE_IDX::X_X] = radar_track.velocity_covariance[RADAR_IDX::X_X];
   twist_covariance[POSE_IDX::X_Y] = radar_track.velocity_covariance[RADAR_IDX::X_Y];
@@ -368,8 +362,8 @@ std::array<double, 36> RadarTracksMsgsConverterNode::convertTwistCovarianceMatri
 std::array<double, 36> RadarTracksMsgsConverterNode::convertAccelerationCovarianceMatrix(
   const radar_msgs::msg::RadarTrack & radar_track)
 {
-  using POSE_IDX = autoware::universe_utils::xyzrpy_covariance_index::XYZRPY_COV_IDX;
-  using RADAR_IDX = autoware::universe_utils::xyz_upper_covariance_index::XYZ_UPPER_COV_IDX;
+  using POSE_IDX = autoware_utils::xyzrpy_covariance_index::XYZRPY_COV_IDX;
+  using RADAR_IDX = autoware_utils::xyz_upper_covariance_index::XYZ_UPPER_COV_IDX;
   std::array<double, 36> acceleration_covariance{};
   acceleration_covariance[POSE_IDX::X_X] = radar_track.acceleration_covariance[RADAR_IDX::X_X];
   acceleration_covariance[POSE_IDX::X_Y] = radar_track.acceleration_covariance[RADAR_IDX::X_Y];

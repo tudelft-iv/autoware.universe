@@ -16,11 +16,12 @@
 
 #include "grid_ground_filter.hpp"
 
-#include <autoware/universe_utils/geometry/geometry.hpp>
-#include <autoware/universe_utils/math/normalization.hpp>
-#include <autoware/universe_utils/math/unit_conversion.hpp>
+#include <autoware_utils/geometry/geometry.hpp>
+#include <autoware_utils/math/normalization.hpp>
+#include <autoware_utils/math/unit_conversion.hpp>
 #include <autoware_vehicle_info_utils/vehicle_info_utils.hpp>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,12 +29,12 @@
 namespace autoware::ground_segmentation
 {
 using autoware::pointcloud_preprocessor::get_param;
-using autoware::universe_utils::calcDistance3d;
-using autoware::universe_utils::deg2rad;
-using autoware::universe_utils::normalizeDegree;
-using autoware::universe_utils::normalizeRadian;
-using autoware::universe_utils::ScopedTimeTrack;
 using autoware::vehicle_info_utils::VehicleInfoUtils;
+using autoware_utils::calc_distance3d;
+using autoware_utils::deg2rad;
+using autoware_utils::normalize_degree;
+using autoware_utils::normalize_radian;
+using autoware_utils::ScopedTimeTrack;
 
 ScanGroundFilterComponent::ScanGroundFilterComponent(const rclcpp::NodeOptions & options)
 : autoware::pointcloud_preprocessor::Filter("ScanGroundFilter", options)
@@ -67,6 +68,8 @@ ScanGroundFilterComponent::ScanGroundFilterComponent(const rclcpp::NodeOptions &
 
     // grid mode parameters
     use_recheck_ground_cluster_ = declare_parameter<bool>("use_recheck_ground_cluster");
+    recheck_start_distance_ =
+      static_cast<float>(declare_parameter<double>("recheck_start_distance"));
     use_lowest_point_ = declare_parameter<bool>("use_lowest_point");
     detection_range_z_max_ = static_cast<float>(declare_parameter<double>("detection_range_z_max"));
     low_priority_region_x_ = static_cast<float>(declare_parameter<double>("low_priority_region_x"));
@@ -76,10 +79,7 @@ ScanGroundFilterComponent::ScanGroundFilterComponent(const rclcpp::NodeOptions &
 
     // grid parameters
     grid_size_m_ = static_cast<float>(declare_parameter<double>("grid_size_m"));
-    grid_mode_switch_radius_ =
-      static_cast<float>(declare_parameter<double>("grid_mode_switch_radius"));
     gnd_grid_buffer_size_ = declare_parameter<int>("gnd_grid_buffer_size");
-    virtual_lidar_z_ = vehicle_info_.vehicle_height_m;
 
     // initialize grid filter
     {
@@ -89,16 +89,15 @@ ScanGroundFilterComponent::ScanGroundFilterComponent(const rclcpp::NodeOptions &
       param.radial_divider_angle_rad = radial_divider_angle_rad_;
 
       param.use_recheck_ground_cluster = use_recheck_ground_cluster_;
+      param.recheck_start_distance = recheck_start_distance_;
       param.use_lowest_point = use_lowest_point_;
       param.detection_range_z_max = detection_range_z_max_;
       param.non_ground_height_threshold = non_ground_height_threshold_;
 
       param.grid_size_m = grid_size_m_;
-      param.grid_mode_switch_radius = grid_mode_switch_radius_;
       param.gnd_grid_buffer_size = gnd_grid_buffer_size_;
       param.virtual_lidar_x = vehicle_info_.wheel_base_m / 2.0f + center_pcl_shift_;
       param.virtual_lidar_y = 0.0f;
-      param.virtual_lidar_z = virtual_lidar_z_;
 
       grid_ground_filter_ptr_ = std::make_unique<GridGroundFilter>(param);
     }
@@ -110,8 +109,8 @@ ScanGroundFilterComponent::ScanGroundFilterComponent(const rclcpp::NodeOptions &
 
   // initialize debug tool
   {
-    using autoware::universe_utils::DebugPublisher;
-    using autoware::universe_utils::StopWatch;
+    using autoware_utils::DebugPublisher;
+    using autoware_utils::StopWatch;
     stop_watch_ptr_ = std::make_unique<StopWatch<std::chrono::milliseconds>>();
     debug_publisher_ptr_ = std::make_unique<DebugPublisher>(this, "scan_ground_filter");
     stop_watch_ptr_->tic("cyclic_time");
@@ -120,10 +119,10 @@ ScanGroundFilterComponent::ScanGroundFilterComponent(const rclcpp::NodeOptions &
     bool use_time_keeper = declare_parameter<bool>("publish_processing_time_detail");
     if (use_time_keeper) {
       detailed_processing_time_publisher_ =
-        this->create_publisher<autoware::universe_utils::ProcessingTimeDetail>(
+        this->create_publisher<autoware_utils::ProcessingTimeDetail>(
           "~/debug/processing_time_detail_ms", 1);
-      auto time_keeper = autoware::universe_utils::TimeKeeper(detailed_processing_time_publisher_);
-      time_keeper_ = std::make_shared<autoware::universe_utils::TimeKeeper>(time_keeper);
+      auto time_keeper = autoware_utils::TimeKeeper(detailed_processing_time_publisher_);
+      time_keeper_ = std::make_shared<autoware_utils::TimeKeeper>(time_keeper);
 
       // set time keeper to grid
       grid_ground_filter_ptr_->setTimeKeeper(time_keeper_);
@@ -159,7 +158,7 @@ void ScanGroundFilterComponent::convertPointcloud(
 
       // determine the azimuth angle group
       auto radius{static_cast<float>(std::hypot(input_point.x, input_point.y))};
-      auto theta{normalizeRadian(std::atan2(input_point.x, input_point.y), 0.0)};
+      auto theta{normalize_radian(std::atan2(input_point.x, input_point.y), 0.0)};
       auto radial_div{static_cast<size_t>(std::floor(theta * inv_radial_divider_angle_rad))};
 
       current_point.radius = radius;
@@ -238,39 +237,46 @@ void ScanGroundFilterComponent::classifyPointCloud(
         prev_gnd_slope = 0.0f;
         ground_cluster.initialize();
         non_ground_cluster.initialize();
-        points_distance = calcDistance3d(point_curr, prev_gnd_point);
+        points_distance = calc_distance3d(point_curr, prev_gnd_point);
       } else {
-        points_distance = calcDistance3d(point_curr, point_prev);
+        points_distance = calc_distance3d(point_curr, point_prev);
       }
 
       float radius_distance_from_gnd = pd.radius - prev_gnd_radius;
       float height_from_gnd = point_curr.z - prev_gnd_point.z;
-      float height_from_obj = point_curr.z - non_ground_cluster.getAverageHeight();
-      bool calculate_slope = false;
+      float height_from_obj = 0.0f;
+      if (non_ground_cluster.point_num > 0) {
+        height_from_obj = point_curr.z - non_ground_cluster.getAverageHeight();
+      }
+      bool calculate_slope = true;
       bool is_point_close_to_prev =
         (points_distance <
          (pd.radius * radial_divider_angle_rad_ + split_points_distance_tolerance_));
 
-      float global_slope_ratio = point_curr.z / pd.radius;
+      if (is_point_close_to_prev) {
+        if (ground_cluster.point_num > 0) {
+          height_from_gnd = point_curr.z - ground_cluster.getAverageHeight();
+          radius_distance_from_gnd = pd.radius - ground_cluster.getAverageRadius();
+        }
+      }
+
+      float global_slope_ratio = pd.radius > 0.0f ? point_curr.z / pd.radius : 0.0f;
       // check points which is far enough from previous point
       if (global_slope_ratio > global_slope_max_ratio_) {
         point_label_curr = PointLabel::NON_GROUND;
         calculate_slope = false;
       } else if (
-        (point_label_prev == PointLabel::NON_GROUND) &&
+        (point_label_prev == PointLabel::NON_GROUND) && (non_ground_cluster.point_num > 0) &&
         (std::abs(height_from_obj) >= split_height_distance_)) {
         calculate_slope = true;
-      } else if (is_point_close_to_prev && std::abs(height_from_gnd) < split_height_distance_) {
+      } else if (
+        point_label_prev == PointLabel::GROUND && is_point_close_to_prev &&
+        std::abs(height_from_gnd) < split_height_distance_) {
         // close to the previous point, set point follow label
         point_label_curr = PointLabel::POINT_FOLLOW;
         calculate_slope = false;
-      } else {
-        calculate_slope = true;
       }
-      if (is_point_close_to_prev) {
-        height_from_gnd = point_curr.z - ground_cluster.getAverageHeight();
-        radius_distance_from_gnd = pd.radius - ground_cluster.getAverageRadius();
-      }
+
       if (calculate_slope) {
         // far from the previous point
         auto local_slope = std::atan2(height_from_gnd, radius_distance_from_gnd);
@@ -288,14 +294,7 @@ void ScanGroundFilterComponent::classifyPointCloud(
       }
       if (point_label_curr == PointLabel::NON_GROUND) {
         out_no_ground_indices.indices.push_back(pd.data_index);
-      } else if (  // NOLINT
-        (point_label_prev == PointLabel::NON_GROUND) &&
-        (point_label_curr == PointLabel::POINT_FOLLOW)) {
-        point_label_curr = PointLabel::NON_GROUND;
-        out_no_ground_indices.indices.push_back(pd.data_index);
-      } else if (  // NOLINT
-        (point_label_prev == PointLabel::GROUND) &&
-        (point_label_curr == PointLabel::POINT_FOLLOW)) {
+      } else if (point_label_curr == PointLabel::POINT_FOLLOW) {
         point_label_curr = PointLabel::GROUND;
       } else {
       }
@@ -371,9 +370,9 @@ void ScanGroundFilterComponent::faster_filter(
   if (debug_publisher_ptr_ && stop_watch_ptr_) {
     const double cyclic_time_ms = stop_watch_ptr_->toc("cyclic_time", true);
     const double processing_time_ms = stop_watch_ptr_->toc("processing_time", true);
-    debug_publisher_ptr_->publish<tier4_debug_msgs::msg::Float64Stamped>(
+    debug_publisher_ptr_->publish<autoware_internal_debug_msgs::msg::Float64Stamped>(
       "debug/cyclic_time_ms", cyclic_time_ms);
-    debug_publisher_ptr_->publish<tier4_debug_msgs::msg::Float64Stamped>(
+    debug_publisher_ptr_->publish<autoware_internal_debug_msgs::msg::Float64Stamped>(
       "debug/processing_time_ms", processing_time_ms);
   }
 }
@@ -393,10 +392,7 @@ rcl_interfaces::msg::SetParametersResult ScanGroundFilterComponent::onParameter(
   const std::vector<rclcpp::Parameter> & param)
 {
   if (get_param(param, "grid_size_m", grid_size_m_)) {
-    // grid_ptr_->initialize(grid_size_m_, radial_divider_angle_rad_, grid_mode_switch_radius_);
-  }
-  if (get_param(param, "grid_mode_switch_radius", grid_mode_switch_radius_)) {
-    // grid_ptr_->initialize(grid_size_m_, radial_divider_angle_rad_, grid_mode_switch_radius_);
+    // grid_ptr_->initialize(grid_size_m_, radial_divider_angle_rad_);
   }
   double global_slope_max_angle_deg{get_parameter("global_slope_max_angle_deg").as_double()};
   if (get_param(param, "global_slope_max_angle_deg", global_slope_max_angle_deg)) {
@@ -418,7 +414,7 @@ rcl_interfaces::msg::SetParametersResult ScanGroundFilterComponent::onParameter(
   if (get_param(param, "radial_divider_angle_deg", radial_divider_angle_deg)) {
     radial_divider_angle_rad_ = deg2rad(radial_divider_angle_deg);
     radial_dividers_num_ = std::ceil(2.0 * M_PI / radial_divider_angle_rad_);
-    // grid_ptr_->initialize(grid_size_m_, radial_divider_angle_rad_, grid_mode_switch_radius_);
+    // grid_ptr_->initialize(grid_size_m_, radial_divider_angle_rad_);
     RCLCPP_DEBUG(
       get_logger(), "Setting radial_divider_angle_rad to: %f.", radial_divider_angle_rad_);
     RCLCPP_DEBUG(get_logger(), "Setting radial_dividers_num to: %zu.", radial_dividers_num_);
@@ -440,6 +436,9 @@ rcl_interfaces::msg::SetParametersResult ScanGroundFilterComponent::onParameter(
     RCLCPP_DEBUG_STREAM(
       get_logger(),
       "Setting use_recheck_ground_cluster to: " << std::boolalpha << use_recheck_ground_cluster_);
+  }
+  if (get_param(param, "recheck_start_distance", recheck_start_distance_)) {
+    RCLCPP_DEBUG(get_logger(), "Setting recheck_start_distance to: %f.", recheck_start_distance_);
   }
   rcl_interfaces::msg::SetParametersResult result;
   result.successful = true;

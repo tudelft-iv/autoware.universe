@@ -17,8 +17,8 @@
 #include "autoware/interpolation/linear_interpolation.hpp"
 #include "autoware/interpolation/spline_interpolation.hpp"
 #include "autoware/motion_utils/trajectory/trajectory.hpp"
-#include "autoware/universe_utils/geometry/geometry.hpp"
-#include "autoware/universe_utils/math/normalization.hpp"
+#include "autoware_utils/geometry/geometry.hpp"
+#include "autoware_utils/math/normalization.hpp"
 
 #include <algorithm>
 #include <iostream>
@@ -44,9 +44,9 @@ double calcLongitudinalOffset(
 
 namespace MPCUtils
 {
-using autoware::universe_utils::calcDistance2d;
-using autoware::universe_utils::createQuaternionFromYaw;
-using autoware::universe_utils::normalizeRadian;
+using autoware_utils::calc_distance2d;
+using autoware_utils::create_quaternion_from_yaw;
+using autoware_utils::normalize_radian;
 
 double calcDistance2d(const MPCTrajectory & trajectory, const size_t idx1, const size_t idx2)
 {
@@ -67,7 +67,7 @@ void convertEulerAngleToMonotonic(std::vector<double> & angle_vector)
 {
   for (uint i = 1; i < angle_vector.size(); ++i) {
     const double da = angle_vector.at(i) - angle_vector.at(i - 1);
-    angle_vector.at(i) = angle_vector.at(i - 1) + normalizeRadian(da);
+    angle_vector.at(i) = angle_vector.at(i - 1) + normalize_radian(da);
   }
 }
 
@@ -174,7 +174,7 @@ bool linearInterpMPCTrajectory(
     out_traj.x = lerp_arc_length(in_traj.x);
     out_traj.y = lerp_arc_length(in_traj.y);
     out_traj.z = lerp_arc_length(in_traj.z);
-    out_traj.yaw = lerp_arc_length(in_traj.yaw);
+    out_traj.yaw = lerp_arc_length(in_traj_yaw);
     out_traj.vx = lerp_arc_length(in_traj.vx);
     out_traj.k = lerp_arc_length(in_traj.k);
     out_traj.smooth_k = lerp_arc_length(in_traj.smooth_k);
@@ -242,7 +242,7 @@ std::vector<double> calcTrajectoryCurvature(
     p2.y = traj.y.at(curr_idx);
     p3.y = traj.y.at(next_idx);
     try {
-      curvature_vec.at(curr_idx) = autoware::universe_utils::calcCurvature(p1, p2, p3);
+      curvature_vec.at(curr_idx) = autoware_utils::calc_curvature(p1, p2, p3);
     } catch (...) {
       std::cerr << "[MPC] 2 points are too close to calculate curvature." << std::endl;
       curvature_vec.at(curr_idx) = 0.0;
@@ -275,7 +275,7 @@ MPCTrajectory convertToMPCTrajectory(const Trajectory & input)
   return output;
 }
 
-Trajectory convertToAutowareTrajectory(const MPCTrajectory & input)
+Trajectory convertToAutowareTrajectory(const MPCTrajectory & input, const double wheelbase)
 {
   Trajectory output;
   TrajectoryPoint p;
@@ -283,9 +283,14 @@ Trajectory convertToAutowareTrajectory(const MPCTrajectory & input)
     p.pose.position.x = input.x.at(i);
     p.pose.position.y = input.y.at(i);
     p.pose.position.z = input.z.at(i);
-    p.pose.orientation = autoware::universe_utils::createQuaternionFromYaw(input.yaw.at(i));
+    p.pose.orientation = autoware_utils::create_quaternion_from_yaw(input.yaw.at(i));
     p.longitudinal_velocity_mps =
       static_cast<decltype(p.longitudinal_velocity_mps)>(input.vx.at(i));
+    p.time_from_start =
+      rclcpp::Duration::from_seconds(input.relative_time.at(i) - input.relative_time.front());
+    if (wheelbase != 0.0) {
+      p.front_wheel_angle_rad = static_cast<float>(std::atan(input.smooth_k.at(i) * wheelbase));
+    }
     output.points.push_back(p);
     if (output.points.size() == output.points.max_size()) {
       break;
@@ -355,7 +360,7 @@ bool calcNearestPoseInterp(
   if (traj.size() == 1) {
     nearest_pose->position.x = traj.x.at(*nearest_index);
     nearest_pose->position.y = traj.y.at(*nearest_index);
-    nearest_pose->orientation = createQuaternionFromYaw(traj.yaw.at(*nearest_index));
+    nearest_pose->orientation = create_quaternion_from_yaw(traj.yaw.at(*nearest_index));
     *nearest_time = traj.relative_time.at(*nearest_index);
     return true;
   }
@@ -390,13 +395,12 @@ bool calcNearestPoseInterp(
   geometry_msgs::msg::Point prev_traj_point;
   prev_traj_point.x = traj.x.at(prev);
   prev_traj_point.y = traj.y.at(prev);
-  const double traj_seg_length =
-    autoware::universe_utils::calcDistance2d(prev_traj_point, next_traj_point);
+  const double traj_seg_length = autoware_utils::calc_distance2d(prev_traj_point, next_traj_point);
   /* if distance between two points are too close */
   if (traj_seg_length < 1.0E-5) {
     nearest_pose->position.x = traj.x.at(*nearest_index);
     nearest_pose->position.y = traj.y.at(*nearest_index);
-    nearest_pose->orientation = createQuaternionFromYaw(traj.yaw.at(*nearest_index));
+    nearest_pose->orientation = create_quaternion_from_yaw(traj.yaw.at(*nearest_index));
     *nearest_time = traj.relative_time.at(*nearest_index);
     return true;
   }
@@ -407,9 +411,9 @@ bool calcNearestPoseInterp(
     0.0, 1.0);
   nearest_pose->position.x = (1 - ratio) * traj.x.at(prev) + ratio * traj.x.at(next);
   nearest_pose->position.y = (1 - ratio) * traj.y.at(prev) + ratio * traj.y.at(next);
-  const double tmp_yaw_err = normalizeRadian(traj.yaw.at(prev) - traj.yaw.at(next));
-  const double nearest_yaw = normalizeRadian(traj.yaw.at(next) + (1 - ratio) * tmp_yaw_err);
-  nearest_pose->orientation = createQuaternionFromYaw(nearest_yaw);
+  const double tmp_yaw_err = normalize_radian(traj.yaw.at(prev) - traj.yaw.at(next));
+  const double nearest_yaw = normalize_radian(traj.yaw.at(next) + (1 - ratio) * tmp_yaw_err);
+  nearest_pose->orientation = create_quaternion_from_yaw(nearest_yaw);
   *nearest_time = (1 - ratio) * traj.relative_time.at(prev) + ratio * traj.relative_time.at(next);
   return true;
 }
@@ -426,7 +430,7 @@ double calcStopDistance(const Trajectory & current_trajectory, const int origin)
     for (int i = origin + 1; i < static_cast<int>(current_trajectory.points.size()) - 1; ++i) {
       const auto & p0 = current_trajectory.points.at(i);
       const auto & p1 = current_trajectory.points.at(i - 1);
-      stop_dist += calcDistance2d(p0, p1);
+      stop_dist += calc_distance2d(p0, p1);
       if (std::fabs(p0.longitudinal_velocity_mps) < zero_velocity) {
         break;
       }
@@ -441,7 +445,7 @@ double calcStopDistance(const Trajectory & current_trajectory, const int origin)
     if (std::fabs(p0.longitudinal_velocity_mps) > zero_velocity) {
       break;
     }
-    stop_dist -= calcDistance2d(p0, p1);
+    stop_dist -= calc_distance2d(p0, p1);
   }
   return stop_dist;
 }
@@ -449,6 +453,8 @@ double calcStopDistance(const Trajectory & current_trajectory, const int origin)
 void extendTrajectoryInYawDirection(
   const double yaw, const double interval, const bool is_forward_shift, MPCTrajectory & traj)
 {
+  if (traj.empty()) return;
+
   // set terminal yaw
   traj.yaw.back() = yaw;
 
@@ -457,12 +463,14 @@ void extendTrajectoryInYawDirection(
   auto extended_pose = autoware_traj.points.back().pose;
 
   constexpr double extend_dist = 10.0;
-  constexpr double extend_vel = 10.0;
+  const double extend_vel = traj.vx.back();
   const double x_offset = is_forward_shift ? interval : -interval;
-  const double dt = interval / extend_vel;
+  constexpr double min_vel_threshold = 0.1;
+  const double dt =
+    (std::fabs(extend_vel) < min_vel_threshold) ? 1.0e-4 : interval / std::fabs(extend_vel);
   const size_t num_extended_point = static_cast<size_t>(extend_dist / interval);
   for (size_t i = 0; i < num_extended_point; ++i) {
-    extended_pose = autoware::universe_utils::calcOffsetPose(extended_pose, x_offset, 0.0, 0.0);
+    extended_pose = autoware_utils::calc_offset_pose(extended_pose, x_offset, 0.0, 0.0);
     traj.push_back(
       extended_pose.position.x, extended_pose.position.y, extended_pose.position.z, traj.yaw.back(),
       extend_vel, traj.k.back(), traj.smooth_k.back(), traj.relative_time.back() + dt);

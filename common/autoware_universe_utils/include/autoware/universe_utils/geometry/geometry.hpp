@@ -26,7 +26,9 @@
 
 #define EIGEN_MPL2_ONLY
 #include <Eigen/Core>
+#include <tf2/utils.hpp>
 
+#include <autoware_internal_planning_msgs/msg/path_with_lane_id.hpp>
 #include <autoware_planning_msgs/msg/path.hpp>
 #include <autoware_planning_msgs/msg/trajectory.hpp>
 #include <geometry_msgs/msg/point32.hpp>
@@ -38,62 +40,12 @@
 #include <geometry_msgs/msg/twist_with_covariance.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#include <tier4_planning_msgs/msg/path_with_lane_id.hpp>
-
-#include <tf2/utils.h>
 
 // TODO(wep21): Remove these apis
 //              after they are implemented in ros2 geometry2.
 namespace tf2
 {
 void fromMsg(const geometry_msgs::msg::PoseStamped & msg, tf2::Stamped<tf2::Transform> & out);
-#ifdef ROS_DISTRO_GALACTIC
-// Remove after this commit is released
-// https://github.com/ros2/geometry2/commit/e9da371d81e388a589540357c050e262442f1b4a
-inline geometry_msgs::msg::Point & toMsg(const tf2::Vector3 & in, geometry_msgs::msg::Point & out)
-{
-  out.x = in.getX();
-  out.y = in.getY();
-  out.z = in.getZ();
-  return out;
-}
-
-// Remove after this commit is released
-// https://github.com/ros2/geometry2/commit/e9da371d81e388a589540357c050e262442f1b4a
-inline void fromMsg(const geometry_msgs::msg::Point & in, tf2::Vector3 & out)
-{
-  out = tf2::Vector3(in.x, in.y, in.z);
-}
-
-template <>
-inline void doTransform(
-  const geometry_msgs::msg::Point & t_in, geometry_msgs::msg::Point & t_out,
-  const geometry_msgs::msg::TransformStamped & transform)
-{
-  tf2::Transform t;
-  fromMsg(transform.transform, t);
-  tf2::Vector3 v_in;
-  fromMsg(t_in, v_in);
-  tf2::Vector3 v_out = t * v_in;
-  toMsg(v_out, t_out);
-}
-
-template <>
-inline void doTransform(
-  const geometry_msgs::msg::Pose & t_in, geometry_msgs::msg::Pose & t_out,
-  const geometry_msgs::msg::TransformStamped & transform)
-{
-  tf2::Vector3 v;
-  fromMsg(t_in.position, v);
-  tf2::Quaternion r;
-  fromMsg(t_in.orientation, r);
-
-  tf2::Transform t;
-  fromMsg(transform.transform, t);
-  tf2::Transform v_out = t * tf2::Transform(r, v);
-  toMsg(v_out, t_out);
-}
-#endif
 }  // namespace tf2
 
 namespace autoware::universe_utils
@@ -102,6 +54,12 @@ template <class T>
 geometry_msgs::msg::Point getPoint(const T & p)
 {
   return geometry_msgs::build<geometry_msgs::msg::Point>().x(p.x).y(p.y).z(p.z);
+}
+
+template <>
+inline geometry_msgs::msg::Point getPoint(const Point2d & p)
+{
+  return geometry_msgs::build<geometry_msgs::msg::Point>().x(p.x()).y(p.y()).z(0.0);
 }
 
 template <>
@@ -135,7 +93,8 @@ inline geometry_msgs::msg::Point getPoint(const autoware_planning_msgs::msg::Pat
 }
 
 template <>
-inline geometry_msgs::msg::Point getPoint(const tier4_planning_msgs::msg::PathPointWithLaneId & p)
+inline geometry_msgs::msg::Point getPoint(
+  const autoware_internal_planning_msgs::msg::PathPointWithLaneId & p)
 {
   return p.point.pose.position;
 }
@@ -172,7 +131,8 @@ inline geometry_msgs::msg::Pose getPose(const autoware_planning_msgs::msg::PathP
 }
 
 template <>
-inline geometry_msgs::msg::Pose getPose(const tier4_planning_msgs::msg::PathPointWithLaneId & p)
+inline geometry_msgs::msg::Pose getPose(
+  const autoware_internal_planning_msgs::msg::PathPointWithLaneId & p)
 {
   return p.point.pose;
 }
@@ -197,7 +157,8 @@ inline double getLongitudinalVelocity(const autoware_planning_msgs::msg::PathPoi
 }
 
 template <>
-inline double getLongitudinalVelocity(const tier4_planning_msgs::msg::PathPointWithLaneId & p)
+inline double getLongitudinalVelocity(
+  const autoware_internal_planning_msgs::msg::PathPointWithLaneId & p)
 {
   return p.point.longitudinal_velocity_mps;
 }
@@ -236,7 +197,8 @@ inline void setPose(
 
 template <>
 inline void setPose(
-  const geometry_msgs::msg::Pose & pose, tier4_planning_msgs::msg::PathPointWithLaneId & p)
+  const geometry_msgs::msg::Pose & pose,
+  autoware_internal_planning_msgs::msg::PathPointWithLaneId & p)
 {
   p.point.pose = pose;
 }
@@ -279,7 +241,7 @@ inline void setLongitudinalVelocity(
 
 template <>
 inline void setLongitudinalVelocity(
-  const float velocity, tier4_planning_msgs::msg::PathPointWithLaneId & p)
+  const float velocity, autoware_internal_planning_msgs::msg::PathPointWithLaneId & p)
 {
   p.point.longitudinal_velocity_mps = velocity;
 }
@@ -576,6 +538,9 @@ bool isTwistCovarianceValid(const geometry_msgs::msg::TwistWithCovariance & twis
 std::optional<geometry_msgs::msg::Point> intersect(
   const geometry_msgs::msg::Point & p1, const geometry_msgs::msg::Point & p2,
   const geometry_msgs::msg::Point & p3, const geometry_msgs::msg::Point & p4);
+
+std::optional<Point2d> intersect(
+  const Point2d & p1, const Point2d & p2, const Point2d & p3, const Point2d & p4);
 
 /**
  * @brief Check if 2 convex polygons intersect using the GJK algorithm

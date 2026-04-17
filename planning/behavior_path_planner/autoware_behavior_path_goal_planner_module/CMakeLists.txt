@@ -14,12 +14,15 @@ ament_auto_add_library(${PROJECT_NAME} SHARED
   src/pull_over_planner/freespace_pull_over.cpp
   src/pull_over_planner/geometric_pull_over.cpp
   src/pull_over_planner/shift_pull_over.cpp
+  src/pull_over_planner/bezier_pull_over.cpp
   src/default_fixed_goal_planner.cpp
   src/goal_searcher.cpp
   src/util.cpp
   src/goal_planner_module.cpp
   src/manager.cpp
+  src/thread_data.cpp
   src/decision_state.cpp
+  src/lane_change.cpp
 )
 
 if(BUILD_EXAMPLES)
@@ -53,4 +56,4 @@ if(BUILD_TESTING)
   target_link_libraries(test_${PROJECT_NAME} ${PROJECT_NAME})
 endif()
 
-ament_auto_package(INSTALL_TO_SHARE config)
+ament_auto_package(INSTALL_TO_SHARE config test_data)

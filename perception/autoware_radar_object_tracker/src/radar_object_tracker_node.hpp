@@ -17,14 +17,19 @@
 
 #include "autoware_radar_object_tracker/association/data_association.hpp"
 
-#include <autoware_lanelet2_extension/utility/message_conversion.hpp>
+#include <autoware/lanelet2_utils/conversion.hpp>
 #include <autoware_lanelet2_extension/utility/query.hpp>
 #include <autoware_lanelet2_extension/utility/utilities.hpp>
+#include <diagnostic_updater/diagnostic_updater.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <tf2/LinearMath/Transform.hpp>
+#include <tf2/convert.hpp>
+#include <tf2/transform_datatypes.hpp>
 
 #include "autoware_perception_msgs/msg/detected_objects.hpp"
 #include "autoware_perception_msgs/msg/tracked_objects.hpp"
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <lanelet2_core/LaneletMap.h>
 #include <lanelet2_core/geometry/BoundingBox.h>
@@ -32,15 +37,6 @@
 #include <lanelet2_core/geometry/Point.h>
 #include <lanelet2_routing/RoutingGraph.h>
 #include <lanelet2_traffic_rules/TrafficRulesFactory.h>
-#include <tf2/LinearMath/Transform.h>
-#include <tf2/convert.h>
-#include <tf2/transform_datatypes.h>
-
-#ifdef ROS_DISTRO_GALACTIC
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
-#else
-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#endif
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
@@ -114,6 +110,11 @@ private:
   // Crosswalk Entry Points
   // lanelet::ConstLanelets crosswalks_;
 
+  // diagnostics
+  double radar_input_stale_threshold_ms_;
+  std::optional<rclcpp::Time> last_processing_timestamp_;
+  diagnostic_updater::Updater diagnostic_updater_{this};
+
   void checkTrackerLifeCycle(
     std::list<std::shared_ptr<Tracker>> & list_tracker, const rclcpp::Time & time,
     const geometry_msgs::msg::Transform & self_transform);
@@ -130,6 +131,8 @@ private:
 
   void publish(const rclcpp::Time & time) const;
   inline bool shouldTrackerPublish(const std::shared_ptr<const Tracker> tracker) const;
+
+  void diagnoseRadarInputInterval(diagnostic_updater::DiagnosticStatusWrapper & stat);
 };
 
 }  // namespace autoware::radar_object_tracker

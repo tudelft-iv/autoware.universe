@@ -14,7 +14,7 @@
 
 #include "node.hpp"
 
-#include <autoware_lanelet2_extension/utility/message_conversion.hpp>
+#include <autoware/lanelet2_utils/conversion.hpp>
 #include <autoware_lanelet2_extension/utility/query.hpp>
 #include <autoware_lanelet2_extension/visualization/visualization.hpp>
 
@@ -169,7 +169,7 @@ void TrafficLightMapVisualizerNode::trafficSignalsCallback(
               visualization_msgs::msg::Marker marker;
               if (
                 isAttributeValue(pt, "color", "red") &&
-                elem.color == autoware_perception_msgs::msg::TrafficLightElement::RED) {
+                elem.color == autoware_perception_msgs::msg::TrafficLightElement::RED) {  // NOLINT
                 lightAsMarker(
                   get_node_logging_interface(), pt, &marker, "traffic_light", current_time);
               } else if (  // NOLINT
@@ -177,7 +177,6 @@ void TrafficLightMapVisualizerNode::trafficSignalsCallback(
                 elem.color == autoware_perception_msgs::msg::TrafficLightElement::GREEN) {
                 lightAsMarker(
                   get_node_logging_interface(), pt, &marker, "traffic_light", current_time);
-
               } else if (  // NOLINT
                 isAttributeValue(pt, "color", "yellow") &&
                 elem.color == autoware_perception_msgs::msg::TrafficLightElement::AMBER) {
@@ -200,9 +199,8 @@ void TrafficLightMapVisualizerNode::trafficSignalsCallback(
 void TrafficLightMapVisualizerNode::binMapCallback(
   const autoware_map_msgs::msg::LaneletMapBin::ConstSharedPtr input_map_msg)
 {
-  lanelet::LaneletMapPtr viz_lanelet_map(new lanelet::LaneletMap);
-
-  lanelet::utils::conversion::fromBinMsg(*input_map_msg, viz_lanelet_map);
+  lanelet::LaneletMapPtr viz_lanelet_map = autoware::experimental::lanelet2_utils::remove_const(
+    autoware::experimental::lanelet2_utils::from_autoware_map_msgs(*input_map_msg));
   RCLCPP_DEBUG(get_logger(), "Map is loaded\n");
 
   // get lanelets etc to visualize

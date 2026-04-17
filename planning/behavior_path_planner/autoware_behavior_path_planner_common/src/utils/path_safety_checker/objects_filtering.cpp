@@ -18,7 +18,8 @@
 #include "autoware/object_recognition_utils/predicted_path_utils.hpp"
 
 #include <autoware/motion_utils/trajectory/interpolation.hpp>
-#include <autoware/universe_utils/geometry/boost_polygon_utils.hpp>
+#include <autoware_utils/geometry/boost_polygon_utils.hpp>
+#include <autoware_utils/geometry/pose_deviation.hpp>
 
 #include <boost/geometry/algorithms/distance.hpp>
 
@@ -86,9 +87,9 @@ bool isCentroidWithinLanelet(
     return false;
   }
 
-  const auto closest_pose = lanelet::utils::getClosestCenterPose(lanelet, object_pose.position);
-  return std::abs(autoware::universe_utils::calcYawDeviation(closest_pose, object_pose)) <
-         yaw_threshold;
+  const auto closest_pose = autoware::experimental::lanelet2_utils::get_closest_center_pose(
+    lanelet, autoware::experimental::lanelet2_utils::from_ros(object_pose.position));
+  return std::abs(autoware_utils::calc_yaw_deviation(closest_pose, object_pose)) < yaw_threshold;
 }
 
 bool isPolygonOverlapLanelet(
@@ -100,22 +101,22 @@ bool isPolygonOverlapLanelet(
   }
 
   const auto & object_pose = object.kinematics.initial_pose_with_covariance.pose;
-  const auto closest_pose = lanelet::utils::getClosestCenterPose(lanelet, object_pose.position);
-  return std::abs(autoware::universe_utils::calcYawDeviation(closest_pose, object_pose)) <
-         yaw_threshold;
+  const auto closest_pose = autoware::experimental::lanelet2_utils::get_closest_center_pose(
+    lanelet, autoware::experimental::lanelet2_utils::from_ros(object_pose));
+  return std::abs(autoware_utils::calc_yaw_deviation(closest_pose, object_pose)) < yaw_threshold;
 }
 
 bool isPolygonOverlapLanelet(
-  const PredictedObject & object, const autoware::universe_utils::Polygon2d & lanelet_polygon)
+  const PredictedObject & object, const autoware_utils::Polygon2d & lanelet_polygon)
 {
-  const auto object_polygon = autoware::universe_utils::toPolygon2d(object);
+  const auto object_polygon = autoware_utils::to_polygon2d(object);
   return !boost::geometry::disjoint(lanelet_polygon, object_polygon);
 }
 
 bool isPolygonOverlapLanelet(
   const PredictedObject & object, const lanelet::BasicPolygon2d & lanelet_polygon)
 {
-  const auto object_polygon = autoware::universe_utils::toPolygon2d(object);
+  const auto object_polygon = autoware_utils::to_polygon2d(object);
   return !boost::geometry::disjoint(lanelet_polygon, object_polygon);
 }
 
@@ -262,19 +263,22 @@ std::pair<PredictedObjects, PredictedObjects> separateObjectsByLanelets(
   return std::make_pair(target_objects, other_objects);
 }
 
-std::vector<PredictedPathWithPolygon> getPredictedPathFromObj(
-  const ExtendedPredictedObject & obj, const bool & is_use_all_predicted_path)
-{
-  if (!is_use_all_predicted_path) {
-    const auto max_confidence_path = std::max_element(
-      obj.predicted_paths.begin(), obj.predicted_paths.end(),
-      [](const auto & path1, const auto & path2) { return path1.confidence < path2.confidence; });
-    if (max_confidence_path != obj.predicted_paths.end()) {
-      return {*max_confidence_path};
-    }
-  }
+template std::vector<PredictedPathWithPolygon> get_highest_confidence_paths(
+  std::vector<PredictedPathWithPolygon> predicted_paths);
+template std::vector<autoware_perception_msgs::msg::PredictedPath> get_highest_confidence_paths(
+  std::vector<autoware_perception_msgs::msg::PredictedPath> predicted_paths);
 
-  return obj.predicted_paths;
+template std::vector<PredictedPathWithPolygon> get_object_predicted_paths(
+  const std::vector<PredictedPathWithPolygon> & predicted_paths,
+  const bool is_use_all_predicted_path);
+template std::vector<autoware_perception_msgs::msg::PredictedPath> get_object_predicted_paths(
+  const std::vector<autoware_perception_msgs::msg::PredictedPath> & predicted_paths,
+  const bool is_use_all_predicted_path);
+
+std::vector<PredictedPathWithPolygon> getPredictedPathFromObj(
+  const ExtendedPredictedObject & obj, const bool is_use_all_predicted_path)
+{
+  return get_object_predicted_paths(obj.predicted_paths, is_use_all_predicted_path);
 }
 
 std::vector<PoseWithVelocityStamped> createPredictedPath(
@@ -357,7 +361,7 @@ ExtendedPredictedObject transform(
     for (double t = 0.0; t < safety_check_time_horizon + 1e-3; t += safety_check_time_resolution) {
       const auto obj_pose = autoware::object_recognition_utils::calcInterpolatedPose(path, t);
       if (obj_pose) {
-        const auto obj_polygon = autoware::universe_utils::toPolygon2d(*obj_pose, object.shape);
+        const auto obj_polygon = autoware_utils::to_polygon2d(*obj_pose, object.shape);
         extended_object.predicted_paths[i].path.emplace_back(
           t, *obj_pose, obj_velocity, obj_polygon);
       }

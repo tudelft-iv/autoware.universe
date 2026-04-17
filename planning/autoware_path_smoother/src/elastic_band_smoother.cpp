@@ -108,15 +108,14 @@ ElasticBandSmoother::ElasticBandSmoother(const rclcpp::NodeOptions & node_option
   set_param_res_ = this->add_on_set_parameters_callback(
     std::bind(&ElasticBandSmoother::onParam, this, std::placeholders::_1));
 
-  logger_configure_ = std::make_unique<autoware::universe_utils::LoggerLevelConfigure>(this);
-  published_time_publisher_ =
-    std::make_unique<autoware::universe_utils::PublishedTimePublisher>(this);
+  logger_configure_ = std::make_unique<autoware_utils::LoggerLevelConfigure>(this);
+  published_time_publisher_ = std::make_unique<autoware_utils::PublishedTimePublisher>(this);
 }
 
 rcl_interfaces::msg::SetParametersResult ElasticBandSmoother::onParam(
   const std::vector<rclcpp::Parameter> & parameters)
 {
-  using autoware::universe_utils::updateParam;
+  using autoware_utils::update_param;
 
   // parameters for ego nearest search
   ego_nearest_param_.onParam(parameters);
@@ -158,7 +157,7 @@ void ElasticBandSmoother::onPath(const Path::ConstSharedPtr path_ptr)
   time_keeper_ptr_->tic(__func__);
 
   // check if data is ready and valid
-  const auto ego_state_ptr = odom_sub_.takeData();
+  const auto ego_state_ptr = odom_sub_.take_data();
   if (!isDataReady(*path_ptr, ego_state_ptr, *get_clock())) {
     return;
   }
@@ -299,14 +298,17 @@ void ElasticBandSmoother::applyInputVelocity(
     // trajectory_utils::findEgoSegmentIndex
     //       for the case where input_traj_points is much longer than output_traj_points, and the
     //       former has a stop point but the latter will not have.
-    const auto stop_seg_idx = autoware::motion_utils::findNearestSegmentIndex(
+    auto stop_seg_idx = autoware::motion_utils::findNearestSegmentIndex(
       output_traj_points, input_stop_pose, ego_nearest_param_.dist_threshold,
       ego_nearest_param_.yaw_threshold);
 
     // calculate and insert stop pose on output trajectory
     const bool is_stop_point_inside_trajectory = [&]() {
       if (!stop_seg_idx) {
-        return false;
+        // retry without distance/yaw constraints to avoid skipping a stop point as much as possible
+        stop_seg_idx =
+          autoware::motion_utils::findNearestSegmentIndex(output_traj_points, input_stop_pose);
+        if (!stop_seg_idx) return false;
       }
       if (*stop_seg_idx == output_traj_points.size() - 2) {
         const double signed_projected_length_to_segment =

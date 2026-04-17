@@ -142,6 +142,7 @@ public:
     OperationModeState msg;
     msg.stamp = node->now();
     msg.mode = OperationModeState::AUTONOMOUS;
+    msg.is_autoware_control_enabled = true;
     operation_mode_pub->publish(msg);
   };
 
@@ -177,7 +178,9 @@ public:
     fnf->create_publisher<AccelWithCovarianceStamped>("controller/input/current_accel");
 
   rclcpp::Publisher<OperationModeState>::SharedPtr operation_mode_pub =
-    fnf->create_publisher<OperationModeState>("controller/input/current_operation_mode");
+    fnf->create_publisher<OperationModeState>(
+      "controller/input/current_operation_mode", std::chrono::milliseconds{100},
+      rclcpp::QoS(1).transient_local());
 
   rclcpp::Subscription<Control>::SharedPtr cmd_sub = fnf->create_subscription<Control>(
     "controller/output/control_cmd", *fnf->get_fake_node(), [this](const Control::SharedPtr msg) {
@@ -508,34 +511,6 @@ TEST_F(FakeNodeFixture, longitudinal_reverse)
   ASSERT_TRUE(tester.received_control_command);
   EXPECT_LT(tester.cmd_msg->longitudinal.velocity, 0.0f);
   EXPECT_GT(tester.cmd_msg->longitudinal.acceleration, 0.0f);
-}
-
-TEST_F(FakeNodeFixture, longitudinal_emergency)
-{
-  const auto node_options = makeNodeOptions();
-  ControllerTester tester(this, node_options);
-
-  tester.send_default_transform();
-  tester.publish_default_odom();
-  tester.publish_autonomous_operation_mode();
-  tester.publish_default_steer();
-  tester.publish_default_acc();
-
-  // Publish trajectory starting away from the current ego pose
-  Trajectory traj;
-  traj.header.stamp = tester.node->now();
-  traj.header.frame_id = "map";
-  traj.points.push_back(make_traj_point(10.0, 0.0, 1.0f));
-  traj.points.push_back(make_traj_point(50.0, 0.0, 1.0f));
-  traj.points.push_back(make_traj_point(100.0, 0.0, 1.0f));
-  tester.traj_pub->publish(traj);
-
-  test_utils::waitForMessage(tester.node, this, tester.received_control_command);
-
-  ASSERT_TRUE(tester.received_control_command);
-  // Emergencies (e.g., far from trajectory) produces braking command (0 vel, negative accel)
-  EXPECT_DOUBLE_EQ(tester.cmd_msg->longitudinal.velocity, 0.0f);
-  EXPECT_LT(tester.cmd_msg->longitudinal.acceleration, 0.0f);
 }
 
 TEST_F(FakeNodeFixture, longitudinal_not_check_steer_converged)

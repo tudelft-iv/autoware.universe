@@ -14,16 +14,19 @@
 
 #include "map_based_prediction/utils.hpp"
 
+#include <autoware/lanelet2_utils/conversion.hpp>
+#include <autoware/lanelet2_utils/geometry.hpp>
 #include <autoware/motion_utils/trajectory/trajectory.hpp>
-#include <autoware/universe_utils/geometry/geometry.hpp>
-#include <autoware/universe_utils/ros/uuid_helper.hpp>
-#include <autoware_lanelet2_extension/utility/message_conversion.hpp>
+#include <autoware_utils/geometry/geometry.hpp>
+#include <autoware_utils/ros/uuid_helper.hpp>
 
 #include <lanelet2_core/Forward.h>
 #include <lanelet2_core/LaneletMap.h>
+#include <lanelet2_core/primitives/Lanelet.h>
 
 #include <algorithm>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -47,10 +50,12 @@ double calcAbsYawDiffBetweenLaneletAndObject(
   const TrackedObject & object, const lanelet::ConstLanelet & lanelet)
 {
   const double object_yaw = tf2::getYaw(object.kinematics.pose_with_covariance.pose.orientation);
-  const double lane_yaw =
-    lanelet::utils::getLaneletAngle(lanelet, object.kinematics.pose_with_covariance.pose.position);
+  const double lane_yaw = autoware::experimental::lanelet2_utils::get_lanelet_angle(
+    lanelet,
+    autoware::experimental::lanelet2_utils::from_ros(object.kinematics.pose_with_covariance.pose)
+      .basicPoint());
   const double delta_yaw = object_yaw - lane_yaw;
-  const double normalized_delta_yaw = autoware::universe_utils::normalizeRadian(delta_yaw);
+  const double normalized_delta_yaw = autoware_utils::normalize_radian(delta_yaw);
   const double abs_norm_delta = std::fabs(normalized_delta_yaw);
   return abs_norm_delta;
 }
@@ -104,7 +109,7 @@ bool withinRoadLanelet(
  * @param label
  * @return ObjectClassification::_label_type
  */
-ObjectClassification::_label_type changeLabelForPrediction(
+ObjectClassification::_label_type changeVRULabelForPrediction(
   const ObjectClassification::_label_type & label, const TrackedObject & object,
   const lanelet::LaneletMapPtr & lanelet_map_ptr_)
 {
@@ -125,7 +130,7 @@ ObjectClassification::_label_type changeLabelForPrediction(
       if (within_road_lanelet) return ObjectClassification::MOTORCYCLE;
 
       constexpr float high_speed_threshold =
-        autoware::universe_utils::kmph2mps(25.0);  // High speed bicycle 25 km/h
+        autoware_utils::kmph2mps(25.0);  // High speed bicycle 25 km/h
       // calc abs speed from x and y velocity
       const double abs_speed = std::hypot(
         object.kinematics.twist_with_covariance.twist.linear.x,
@@ -139,7 +144,7 @@ ObjectClassification::_label_type changeLabelForPrediction(
 
     case ObjectClassification::PEDESTRIAN: {
       const float max_velocity_for_human_mps =
-        autoware::universe_utils::kmph2mps(25.0);  // Max human being motion speed is 25km/h
+        autoware_utils::kmph2mps(25.0);  // Max human being motion speed is 25km/h
       const double abs_speed = std::hypot(
         object.kinematics.twist_with_covariance.twist.linear.x,
         object.kinematics.twist_with_covariance.twist.linear.y);
@@ -243,15 +248,16 @@ double calculateLocalLikelihood(
 
   // compute yaw difference between the object and lane
   const double obj_yaw = tf2::getYaw(object.kinematics.pose_with_covariance.pose.orientation);
-  const double lane_yaw = lanelet::utils::getLaneletAngle(current_lanelet, obj_point);
+  const double lane_yaw = autoware::experimental::lanelet2_utils::get_lanelet_angle(
+    current_lanelet, autoware::experimental::lanelet2_utils::from_ros(obj_point).basicPoint());
   const double delta_yaw = obj_yaw - lane_yaw;
-  const double abs_norm_delta_yaw = std::fabs(autoware::universe_utils::normalizeRadian(delta_yaw));
+  const double abs_norm_delta_yaw = std::fabs(autoware_utils::normalize_radian(delta_yaw));
 
   // compute lateral distance
   const auto centerline = current_lanelet.centerline();
   std::vector<geometry_msgs::msg::Point> converted_centerline;
   for (const auto & p : centerline) {
-    const auto converted_p = lanelet::utils::conversion::toGeomMsgPt(p);
+    const auto converted_p = experimental::lanelet2_utils::to_ros(p);
     converted_centerline.push_back(converted_p);
   }
   const double lat_dist =
@@ -295,7 +301,7 @@ bool isDuplicated(
   for (const auto & prev_predicted_path : predicted_paths) {
     const auto prev_path_end = prev_predicted_path.path.back().position;
     const auto current_path_end = predicted_path.path.back().position;
-    const double dist = autoware::universe_utils::calcDistance2d(prev_path_end, current_path_end);
+    const double dist = autoware_utils::calc_distance2d(prev_path_end, current_path_end);
     if (dist < CLOSE_PATH_THRESHOLD) {
       return true;
     }
@@ -317,7 +323,7 @@ bool checkCloseLaneletCondition(
 
   // If the object is in the objects history, we check if the target lanelet is
   // inside the current lanelets id or following lanelets
-  const std::string object_id = autoware::universe_utils::toHexString(object.object_id);
+  const std::string object_id = autoware_utils::to_hex_string(object.object_id);
   if (road_users_history.count(object_id) != 0) {
     const std::vector<lanelet::ConstLanelet> & possible_lanelet =
       road_users_history.at(object_id).back().future_possible_lanelets;
@@ -332,10 +338,12 @@ bool checkCloseLaneletCondition(
 
   // Step2. Calculate the angle difference between the lane angle and obstacle angle
   const double object_yaw = tf2::getYaw(object.kinematics.pose_with_covariance.pose.orientation);
-  const double lane_yaw = lanelet::utils::getLaneletAngle(
-    lanelet.second, object.kinematics.pose_with_covariance.pose.position);
+  const double lane_yaw = autoware::experimental::lanelet2_utils::get_lanelet_angle(
+    lanelet.second,
+    autoware::experimental::lanelet2_utils::from_ros(object.kinematics.pose_with_covariance.pose)
+      .basicPoint());
   const double delta_yaw = object_yaw - lane_yaw;
-  const double normalized_delta_yaw = autoware::universe_utils::normalizeRadian(delta_yaw);
+  const double normalized_delta_yaw = autoware_utils::normalize_radian(delta_yaw);
   const double abs_norm_delta = std::fabs(normalized_delta_yaw);
 
   // Step3. Check if the closest lanelet is valid, and add all
@@ -494,6 +502,34 @@ LaneletsData getCurrentLanelets(
   }
 
   return LaneletsData{};
+}
+
+double lateral_distance_to_lanelet_bounds(
+  const lanelet::ConstLanelet & ll, const geometry_msgs::msg::Point & point)
+{
+  auto distance = std::numeric_limits<double>::max();
+  for (const auto & bound : {ll.leftBound(), ll.rightBound()}) {
+    const auto p = autoware::experimental::lanelet2_utils::from_ros(point);
+    const auto nearest_segment =
+      autoware::experimental::lanelet2_utils::get_closest_segment(bound, p);
+    if (nearest_segment.size() < 2) {
+      continue;
+    }
+    const auto nearest_segment_vector =
+      nearest_segment[1].basicPoint2d() - nearest_segment[0].basicPoint2d();
+    if (nearest_segment_vector.isZero()) {
+      continue;
+    }
+    // project the point onto the infinite line made by the nearest segment
+    const double t = ((p.x() - nearest_segment[0].x()) * nearest_segment_vector.x() +
+                      (p.y() - nearest_segment[0].y()) * nearest_segment_vector.y()) /
+                     (nearest_segment_vector.squaredNorm());
+    const auto projected_object = nearest_segment[0].basicPoint2d() + nearest_segment_vector * t;
+    const auto bound_distance = boost::geometry::distance(
+      lanelet::utils::to2D(p), lanelet::BasicPoint2d(projected_object.x(), projected_object.y()));
+    distance = std::min(distance, bound_distance);
+  }
+  return distance;
 }
 
 }  // namespace utils

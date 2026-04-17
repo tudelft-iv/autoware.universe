@@ -21,46 +21,105 @@
 
 #define EIGEN_MPL2_ONLY
 
+#include "autoware/multi_object_tracker/association/index_pair_checker.hpp"
 #include "autoware/multi_object_tracker/association/solver/gnn_solver.hpp"
 #include "autoware/multi_object_tracker/tracker/tracker.hpp"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
+#include <autoware_utils_debug/time_keeper.hpp>
 
-#include "autoware_perception_msgs/msg/detected_objects.hpp"
+#include <autoware_perception_msgs/msg/detected_objects.hpp>
+
+#include <boost/geometry.hpp>
+#include <boost/geometry/geometries/box.hpp>
+#include <boost/geometry/geometries/point.hpp>
+#include <boost/geometry/index/rtree.hpp>
 
 #include <list>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace autoware::multi_object_tracker
 {
+
+namespace bg = boost::geometry;
+namespace bgi = boost::geometry::index;
+
+// Define point and box types for R-tree
+typedef bg::model::point<double, 2, bg::cs::cartesian> Point;
+typedef bg::model::box<Point> Box;
+typedef std::pair<Point, size_t> ValueType;  // Point and tracker index
+
+struct AssociatorConfig
+{
+  std::unordered_map<TrackerType, std::array<bool, types::NUM_LABELS>> can_assign_map;
+  Eigen::MatrixXd max_dist_matrix;
+  Eigen::MatrixXd max_area_matrix;
+  Eigen::MatrixXd min_area_matrix;
+  Eigen::MatrixXd min_iou_matrix;
+  double unknown_association_giou_threshold;
+};
+
+struct InverseCovariance2D
+{
+  double inv00;  // (d / det)
+  double inv01;  // (-b / det)
+  double inv11;  // (a / det)
+};
+
 class DataAssociation
 {
 private:
-  Eigen::MatrixXi can_assign_matrix_;
-  Eigen::MatrixXd max_dist_matrix_;
-  Eigen::MatrixXd max_area_matrix_;
-  Eigen::MatrixXd min_area_matrix_;
-  Eigen::MatrixXd max_rad_matrix_;
-  Eigen::MatrixXd min_iou_matrix_;
+  AssociatorConfig config_;
   const double score_threshold_;
   std::unique_ptr<gnn_solver::GnnSolverInterface> gnn_solver_ptr_;
+  std::shared_ptr<autoware_utils_debug::TimeKeeper> time_keeper_;
+
+  // R-tree for spatial indexing of trackers
+  bgi::rtree<ValueType, bgi::quadratic<16>> rtree_;
+  // Cache of maximum squared distances per measurement class
+  // For each measurement class, stores the maximum squared distance it could match with any tracker
+  // class
+  std::vector<double> max_squared_dist_per_class_;
+
+  // Cache of squared distances for each class pair to avoid sqrt in inner loop
+  Eigen::MatrixXd squared_distance_matrix_;
+
+  /// Checker for (tracker_idx, measurement_idx) pairs flagged for significant shape change
+  IndexPairChecker significant_shape_change_checker_;
+
+  // Helper to compute max search distances from config
+  void updateMaxSearchDistances();
 
 public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-  DataAssociation(
-    std::vector<int> can_assign_vector, std::vector<double> max_dist_vector,
-    std::vector<double> max_area_vector, std::vector<double> min_area_vector,
-    std::vector<double> max_rad_vector, std::vector<double> min_iou_vector);
+  explicit DataAssociation(const AssociatorConfig & config);
+  virtual ~DataAssociation() {}
+
   void assign(
     const Eigen::MatrixXd & src, std::unordered_map<int, int> & direct_assignment,
     std::unordered_map<int, int> & reverse_assignment);
+
+  double calculateScore(
+    const types::DynamicObject & tracked_object, const std::uint8_t tracker_label,
+    const types::DynamicObject & measurement_object, const std::uint8_t measurement_label,
+    const InverseCovariance2D & inv_cov, bool & has_significant_shape_change) const;
+
   Eigen::MatrixXd calcScoreMatrix(
-    const autoware_perception_msgs::msg::DetectedObjects & measurements,
+    const types::DynamicObjectList & measurements,
     const std::list<std::shared_ptr<Tracker>> & trackers);
-  virtual ~DataAssociation() {}
+
+  const double CHECK_GIOU_THRESHOLD = 0.7;
+  const double AREA_RATIO_THRESHOLD = 1.3;
+  bool hasSignificantShapeChange(size_t tracker_idx, size_t measurement_idx) const
+  {
+    return significant_shape_change_checker_.hasPair(tracker_idx, measurement_idx);
+  }
+
+  void setTimeKeeper(std::shared_ptr<autoware_utils_debug::TimeKeeper> time_keeper_ptr);
 };
 
 }  // namespace autoware::multi_object_tracker

@@ -18,7 +18,7 @@
 #include "data.hpp"
 #include "grid.hpp"
 
-#include <autoware/universe_utils/system/time_keeper.hpp>
+#include <autoware_utils/system/time_keeper.hpp>
 #include <pcl/impl/point_types.hpp>
 
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -137,17 +137,16 @@ struct GridGroundFilterParameter
   size_t radial_dividers_num;
 
   bool use_recheck_ground_cluster;
+  float recheck_start_distance;
   bool use_lowest_point;
   float detection_range_z_max;
   float non_ground_height_threshold;
   const uint16_t gnd_grid_continual_thresh = 3;
 
   float grid_size_m;
-  float grid_mode_switch_radius;
   int gnd_grid_buffer_size;
   float virtual_lidar_x;
   float virtual_lidar_y;
-  float virtual_lidar_z;
 };
 
 class GridGroundFilter
@@ -161,14 +160,14 @@ public:
     param_.radial_dividers_num = std::ceil(2.0 * M_PI / param_.radial_divider_angle_rad);
 
     // initialize grid pointer
-    grid_ptr_ = std::make_unique<Grid>(
-      param_.virtual_lidar_x, param_.virtual_lidar_y, param_.virtual_lidar_z);
-    grid_ptr_->initialize(
-      param_.grid_size_m, param_.radial_divider_angle_rad, param_.grid_mode_switch_radius);
+    grid_ptr_ = std::make_unique<Grid>(param_.virtual_lidar_x, param_.virtual_lidar_y);
+    // TODO(badai-nguyen): Temporary add radial limit to 200.0m constant value.
+    // need to be updated unify with cropbox range parameter
+    grid_ptr_->initialize(param_.grid_size_m, param_.radial_divider_angle_rad, 200.0f);
   }
   ~GridGroundFilter() = default;
 
-  void setTimeKeeper(std::shared_ptr<autoware::universe_utils::TimeKeeper> time_keeper_ptr)
+  void setTimeKeeper(std::shared_ptr<autoware_utils::TimeKeeper> time_keeper_ptr)
   {
     time_keeper_ = std::move(time_keeper_ptr);
 
@@ -196,7 +195,7 @@ private:
   std::unique_ptr<Grid> grid_ptr_;
 
   // debug information
-  std::shared_ptr<autoware::universe_utils::TimeKeeper> time_keeper_;
+  std::shared_ptr<autoware_utils::TimeKeeper> time_keeper_;
 
   bool recursiveSearch(const int check_idx, const int search_cnt, std::vector<int> & idx) const;
   bool recursiveSearch(

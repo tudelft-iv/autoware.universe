@@ -17,13 +17,9 @@
 #include "diagnostics_helper.hpp"
 
 #include <Eigen/Dense>
+#include <tf2/utils.hpp>
 
-#include <tf2/utils.h>
-#ifdef ROS_DISTRO_GALACTIC
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
-#else
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#endif
 
 #include <algorithm>
 #include <cmath>
@@ -56,10 +52,10 @@ LocalizationErrorMonitor::LocalizationErrorMonitor(const rclcpp::NodeOptions & o
   ellipse_marker_pub_ =
     this->create_publisher<visualization_msgs::msg::Marker>("debug/ellipse_marker", durable_qos);
 
-  logger_configure_ = std::make_unique<autoware::universe_utils::LoggerLevelConfigure>(this);
+  logger_configure_ = std::make_unique<autoware_utils_logging::LoggerLevelConfigure>(this);
 
-  diagnostics_error_monitor_ =
-    std::make_unique<autoware::localization_util::DiagnosticsModule>(this, "ellipse_error_status");
+  diagnostics_error_monitor_ = std::make_unique<autoware_utils_diagnostics::DiagnosticsInterface>(
+    this, "ellipse_error_status");
 }
 
 void LocalizationErrorMonitor::on_odom(nav_msgs::msg::Odometry::ConstSharedPtr input_msg)

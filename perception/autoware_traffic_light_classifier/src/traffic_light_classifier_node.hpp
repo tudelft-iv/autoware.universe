@@ -16,6 +16,7 @@
 #define TRAFFIC_LIGHT_CLASSIFIER_NODE_HPP_
 
 #include "classifier/classifier_interface.hpp"
+#include "traffic_light_classifier_process.hpp"
 
 #include <image_transport/image_transport.hpp>
 #include <image_transport/subscriber_filter.hpp>
@@ -48,6 +49,7 @@
 
 #include "classifier/color_classifier.hpp"
 
+#include <autoware_utils/ros/diagnostics_interface.hpp>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 
@@ -89,8 +91,11 @@ private:
     traffic_signal_array_pub_;
   std::shared_ptr<ClassifierInterface> classifier_ptr_;
 
-  double backlight_threshold_;
-  bool is_harsh_backlight(const cv::Mat & img) const;
+  std::unique_ptr<autoware_utils::DiagnosticsInterface>
+    diagnostics_interface_ptr_;  //!< Diagnostic handler.
+
+  double over_exposure_threshold_;
+  double under_exposure_threshold_;
 };
 
 }  // namespace autoware::traffic_light

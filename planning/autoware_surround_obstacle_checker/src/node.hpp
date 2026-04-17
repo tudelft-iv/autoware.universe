@@ -15,26 +15,28 @@
 #ifndef NODE_HPP_
 #define NODE_HPP_
 
-#include "autoware/universe_utils/ros/logger_level_configure.hpp"
-#include "autoware/universe_utils/ros/polling_subscriber.hpp"
+#include "autoware_utils/ros/logger_level_configure.hpp"
+#include "autoware_utils/ros/polling_subscriber.hpp"
 #include "debug_marker.hpp"
-#include "surround_obstacle_checker_node_parameters.hpp"
+#include "type_alias.hpp"
+#include "types.hpp"
 
 #include <autoware/motion_utils/vehicle/vehicle_state_checker.hpp>
+#include <autoware_surround_obstacle_checker/surround_obstacle_checker_node_parameters.hpp>
 #include <autoware_vehicle_info_utils/vehicle_info_utils.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <tf2/utils.hpp>
 
+#include <autoware_internal_debug_msgs/msg/float64_stamped.hpp>
+#include <autoware_internal_planning_msgs/msg/velocity_limit.hpp>
+#include <autoware_internal_planning_msgs/msg/velocity_limit_clear_command.hpp>
 #include <autoware_perception_msgs/msg/predicted_objects.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
 #include <diagnostic_msgs/msg/key_value.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-#include <tier4_debug_msgs/msg/float64_stamped.hpp>
-#include <tier4_planning_msgs/msg/velocity_limit.hpp>
-#include <tier4_planning_msgs/msg/velocity_limit_clear_command.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-#include <tf2/utils.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
@@ -47,15 +49,6 @@
 
 namespace autoware::surround_obstacle_checker
 {
-
-using autoware::motion_utils::VehicleStopChecker;
-using autoware::vehicle_info_utils::VehicleInfo;
-using autoware_perception_msgs::msg::PredictedObjects;
-using autoware_perception_msgs::msg::Shape;
-using tier4_planning_msgs::msg::VelocityLimit;
-using tier4_planning_msgs::msg::VelocityLimitClearCommand;
-
-using Obstacle = std::pair<double /* distance */, geometry_msgs::msg::Point>;
 
 enum class State { PASS, STOP };
 
@@ -71,17 +64,11 @@ private:
 
   void onTimer();
 
-  void onPointCloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
+  std::optional<StopObstacle> getNearestObstacle() const;
 
-  void onDynamicObjects(const PredictedObjects::ConstSharedPtr msg);
+  std::optional<StopObstacle> getNearestObstacleByPointCloud() const;
 
-  void onOdometry(const nav_msgs::msg::Odometry::ConstSharedPtr msg);
-
-  std::optional<Obstacle> getNearestObstacle() const;
-
-  std::optional<Obstacle> getNearestObstacleByPointCloud() const;
-
-  std::optional<Obstacle> getNearestObstacleByDynamicObject() const;
+  std::optional<StopObstacle> getNearestObstacleByDynamicObject() const;
 
   std::optional<geometry_msgs::msg::TransformStamped> getTransform(
     const std::string & source, const std::string & target, const rclcpp::Time & stamp,
@@ -98,18 +85,16 @@ private:
   rclcpp::TimerBase::SharedPtr timer_;
 
   // publisher and subscriber
-  autoware::universe_utils::InterProcessPollingSubscriber<nav_msgs::msg::Odometry> sub_odometry_{
+  autoware_utils::InterProcessPollingSubscriber<nav_msgs::msg::Odometry> sub_odometry_{
     this, "~/input/odometry"};
-  autoware::universe_utils::InterProcessPollingSubscriber<sensor_msgs::msg::PointCloud2>
-    sub_pointcloud_{this, "~/input/pointcloud", autoware::universe_utils::SingleDepthSensorQoS()};
-  autoware::universe_utils::InterProcessPollingSubscriber<PredictedObjects> sub_dynamic_objects_{
+  autoware_utils::InterProcessPollingSubscriber<sensor_msgs::msg::PointCloud2> sub_pointcloud_{
+    this, "~/input/pointcloud", autoware_utils::single_depth_sensor_qos()};
+  autoware_utils::InterProcessPollingSubscriber<PredictedObjects> sub_dynamic_objects_{
     this, "~/input/objects"};
   rclcpp::Publisher<VelocityLimitClearCommand>::SharedPtr pub_clear_velocity_limit_;
   rclcpp::Publisher<VelocityLimit>::SharedPtr pub_velocity_limit_;
-  rclcpp::Publisher<tier4_debug_msgs::msg::Float64Stamped>::SharedPtr pub_processing_time_;
-
-  // parameter callback result
-  OnSetParametersCallbackHandle::SharedPtr set_param_res_;
+  rclcpp::Publisher<autoware_internal_debug_msgs::msg::Float64Stamped>::SharedPtr
+    pub_processing_time_;
 
   // stop checker
   std::unique_ptr<VehicleStopChecker> vehicle_stop_checker_;
@@ -130,7 +115,7 @@ private:
   State state_ = State::PASS;
   std::optional<rclcpp::Time> last_obstacle_found_time_;
 
-  std::unique_ptr<autoware::universe_utils::LoggerLevelConfigure> logger_configure_;
+  std::unique_ptr<autoware_utils::LoggerLevelConfigure> logger_configure_;
 
   std::unordered_map<int, std::string> label_map_;
 

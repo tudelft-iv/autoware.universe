@@ -1,4 +1,4 @@
-// Copyright 2020 Tier IV, Inc.
+// Copyright 2025 Tier IV, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,14 +15,15 @@
 #ifndef AUTOWARE__BEHAVIOR_VELOCITY_BLIND_SPOT_MODULE__MANAGER_HPP_
 #define AUTOWARE__BEHAVIOR_VELOCITY_BLIND_SPOT_MODULE__MANAGER_HPP_
 
+#include "autoware/behavior_velocity_blind_spot_module/parameter.hpp"
 #include "autoware/behavior_velocity_blind_spot_module/scene.hpp"
 
 #include <autoware/behavior_velocity_planner_common/plugin_interface.hpp>
 #include <autoware/behavior_velocity_planner_common/plugin_wrapper.hpp>
-#include <autoware/behavior_velocity_planner_common/scene_module_interface.hpp>
+#include <autoware/behavior_velocity_rtc_interface/scene_module_interface_with_rtc.hpp>
 #include <rclcpp/rclcpp.hpp>
 
-#include <tier4_planning_msgs/msg/path_with_lane_id.hpp>
+#include <autoware_internal_planning_msgs/msg/path_with_lane_id.hpp>
 
 #include <functional>
 #include <memory>
@@ -37,13 +38,23 @@ public:
 
   const char * getModuleName() override { return "blind_spot"; }
 
+  RequiredSubscriptionInfo getRequiredSubscriptions() const override
+  {
+    RequiredSubscriptionInfo required_subscription_info;
+    required_subscription_info.predicted_objects = true;
+    return required_subscription_info;
+  }
+
 private:
-  BlindSpotModule::PlannerParam planner_param_;
+  PlannerParam planner_param_;
 
-  void launchNewModules(const tier4_planning_msgs::msg::PathWithLaneId & path) override;
+  void launchNewModules(const autoware_internal_planning_msgs::msg::PathWithLaneId & path) override;
 
-  std::function<bool(const std::shared_ptr<SceneModuleInterface> &)> getModuleExpiredFunction(
-    const tier4_planning_msgs::msg::PathWithLaneId & path) override;
+  std::function<bool(const std::shared_ptr<SceneModuleInterfaceWithRTC> &)>
+  getModuleExpiredFunction(
+    const autoware_internal_planning_msgs::msg::PathWithLaneId & path) override;
+
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr decision_state_pub_;
 };
 
 class BlindSpotModulePlugin : public PluginWrapper<BlindSpotModuleManager>

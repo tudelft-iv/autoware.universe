@@ -2,23 +2,26 @@ cmake_minimum_required(VERSION 3.17)
 project(autoware_tensorrt_common)
 
 find_package(ament_cmake REQUIRED)
-find_package(cudnn_cmake_module REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(tensorrt_cmake_module REQUIRED)
 
 find_package(CUDA)
 find_package(CUDAToolkit)
-find_package(CUDNN)
 find_package(TENSORRT)
 
-if(NOT (CUDAToolkit_FOUND AND CUDNN_FOUND AND TENSORRT_FOUND))
-  message(WARNING "cuda, cudnn, tensorrt libraries are not found")
+if(NOT (CUDAToolkit_FOUND AND TENSORRT_FOUND))
+  message(WARNING "cuda, tensorrt libraries are not found")
+  return()
+endif()
+
+if(TENSORRT_VERSION VERSION_LESS 8.5)
+  message(WARNING "Unsupported version TensorRT ${TENSORRT_VERSION} detected. This package requires TensorRT 8.5 or later.")
   return()
 endif()
 
 add_library(${PROJECT_NAME} SHARED
   src/tensorrt_common.cpp
-  src/simple_profiler.cpp
+  src/profiler.cpp
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -42,7 +45,7 @@ set_target_properties(${PROJECT_NAME}
     CXX_EXTENSIONS NO
 )
 
-# TODO(autoware_tensorrt_common): Remove -Wno-deprecated-declarations once upgrading to TensorRT 8.5 is complete
+# TODO(amadeuszsz): Remove -Wno-deprecated-declarations once removing implicit quantization
 target_compile_options(${PROJECT_NAME} PRIVATE
   -Wall -Wextra -Wpedantic -Werror -Wno-deprecated-declarations
 )
@@ -72,8 +75,6 @@ ament_export_targets(export_${PROJECT_NAME})
 ament_export_dependencies(
   "CUDA"
   "CUDAToolkit"
-  "cudnn_cmake_module"
-  "CUDNN"
   "rclcpp"
   "tensorrt_cmake_module"
   "TENSORRT"

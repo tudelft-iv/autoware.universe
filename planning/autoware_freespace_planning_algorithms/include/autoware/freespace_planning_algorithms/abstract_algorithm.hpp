@@ -15,14 +15,13 @@
 #ifndef AUTOWARE__FREESPACE_PLANNING_ALGORITHMS__ABSTRACT_ALGORITHM_HPP_
 #define AUTOWARE__FREESPACE_PLANNING_ALGORITHMS__ABSTRACT_ALGORITHM_HPP_
 
-#include <autoware/universe_utils/geometry/geometry.hpp>
-#include <autoware/universe_utils/math/normalization.hpp>
+#include <autoware_utils_geometry/geometry.hpp>
+#include <autoware_utils_math/normalization.hpp>
 #include <autoware_vehicle_info_utils/vehicle_info_utils.hpp>
+#include <tf2/utils.hpp>
 
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
-
-#include <tf2/utils.h>
 
 #include <algorithm>
 #include <limits>
@@ -30,7 +29,7 @@
 
 namespace autoware::freespace_planning_algorithms
 {
-using autoware::universe_utils::normalizeRadian;
+using autoware_utils_math::normalize_radian;
 
 geometry_msgs::msg::Pose transformPose(
   const geometry_msgs::msg::Pose & pose, const geometry_msgs::msg::TransformStamped & transform);
@@ -262,7 +261,7 @@ protected:
 
   inline double getVehicleBaseToFrameDistance(const double angle) const
   {
-    const double normalized_angle = std::abs(normalizeRadian(angle));
+    const double normalized_angle = std::abs(normalize_radian(angle));
     const double w = 0.5 * collision_vehicle_shape_.width;
     const double l_b = collision_vehicle_shape_.base2back;
     const double l_f = collision_vehicle_shape_.length - l_b;

@@ -14,40 +14,48 @@
 
 #include "autoware/behavior_path_lane_change_module/utils/utils.hpp"
 
-#include "autoware/behavior_path_lane_change_module/utils/data_structs.hpp"
-#include "autoware/behavior_path_lane_change_module/utils/path.hpp"
+#include "autoware/behavior_path_lane_change_module/structs/data.hpp"
+#include "autoware/behavior_path_lane_change_module/structs/path.hpp"
 #include "autoware/behavior_path_planner_common/parameters.hpp"
 #include "autoware/behavior_path_planner_common/utils/path_safety_checker/safety_check.hpp"
 #include "autoware/behavior_path_planner_common/utils/path_shifter/path_shifter.hpp"
-#include "autoware/behavior_path_planner_common/utils/path_utils.hpp"
 #include "autoware/behavior_path_planner_common/utils/traffic_light_utils.hpp"
 #include "autoware/behavior_path_planner_common/utils/utils.hpp"
 #include "autoware/object_recognition_utils/predicted_path_utils.hpp"
-#include "autoware/universe_utils/math/unit_conversion.hpp"
+#include "autoware_utils/math/unit_conversion.hpp"
 
+// for the geometry types
+#include <autoware/motion_utils/trajectory/path_shift.hpp>
+#include <autoware_utils/geometry/boost_geometry.hpp>
+// for the svg mapper
 #include <autoware/behavior_path_planner_common/utils/path_safety_checker/objects_filtering.hpp>
+#include <autoware/lanelet2_utils/nn_search.hpp>
 #include <autoware/motion_utils/trajectory/interpolation.hpp>
 #include <autoware/motion_utils/trajectory/path_with_lane_id.hpp>
 #include <autoware/motion_utils/trajectory/trajectory.hpp>
-#include <autoware/universe_utils/geometry/boost_geometry.hpp>
-#include <autoware/universe_utils/geometry/boost_polygon_utils.hpp>
-#include <autoware_lanelet2_extension/utility/query.hpp>
+#include <autoware_frenet_planner/frenet_planner.hpp>
 #include <autoware_lanelet2_extension/utility/utilities.hpp>
+#include <autoware_utils/geometry/boost_polygon_utils.hpp>
+#include <autoware_utils/geometry/geometry.hpp>
+#include <autoware_utils/system/stop_watch.hpp>
 #include <autoware_vehicle_info_utils/vehicle_info.hpp>
-#include <range/v3/algorithm/any_of.hpp>
+#include <range/v3/action/remove_if.hpp>
+#include <range/v3/algorithm.hpp>
+#include <range/v3/numeric.hpp>
 #include <range/v3/range/conversion.hpp>
-#include <range/v3/view/transform.hpp>
+#include <range/v3/view.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <tf2/utils.hpp>
 
-#include <geometry_msgs/msg/detail/pose__struct.hpp>
-
+#include <boost/geometry/algorithms/buffer.hpp>
 #include <boost/geometry/algorithms/detail/disjoint/interface.hpp>
+#include <boost/geometry/io/svg/svg_mapper.hpp>
+#include <boost/geometry/io/svg/write.hpp>
 
 #include <lanelet2_core/LaneletMap.h>
 #include <lanelet2_core/geometry/LineString.h>
 #include <lanelet2_core/geometry/Point.h>
 #include <lanelet2_core/geometry/Polygon.h>
-#include <tf2/utils.h>
 #include <tf2_ros/transform_listener.h>
 
 #include <algorithm>
@@ -56,20 +64,42 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
+namespace
+{
+template <typename T>
+double calc_arc_length(
+  const T & reference_path, const geometry_msgs::msg::Pose & pose,
+  const BehaviorPathPlannerParameters & bpp_params)
+{
+  if (reference_path.empty()) {
+    return 0.0;
+  }
+  const auto nearest_seg_idx =
+    autoware::motion_utils::findFirstNearestSegmentIndexWithSoftConstraints(
+      reference_path, pose, bpp_params.ego_nearest_dist_threshold,
+      bpp_params.ego_nearest_yaw_threshold);
+
+  auto frenet_point = autoware::behavior_path_planner::utils::convertToFrenetPoint(
+    reference_path, pose.position, nearest_seg_idx);
+  return frenet_point.length;
+}
+}  // namespace
 
 namespace autoware::behavior_path_planner::utils::lane_change
 {
 using autoware::route_handler::RouteHandler;
-using autoware::universe_utils::LineString2d;
-using autoware::universe_utils::Polygon2d;
+using autoware_internal_planning_msgs::msg::PathWithLaneId;
 using autoware_perception_msgs::msg::ObjectClassification;
 using autoware_perception_msgs::msg::PredictedObjects;
+using autoware_utils::LineString2d;
+using autoware_utils::Point2d;
+using autoware_utils::Polygon2d;
+using behavior_path_planner::lane_change::PathType;
 using geometry_msgs::msg::Pose;
-using tier4_planning_msgs::msg::PathWithLaneId;
 
-using lanelet::ArcCoordinates;
-using tier4_planning_msgs::msg::PathPointWithLaneId;
+using autoware_internal_planning_msgs::msg::PathPointWithLaneId;
 
 rclcpp::Logger get_logger()
 {
@@ -84,29 +114,20 @@ bool is_mandatory_lane_change(const ModuleType lc_type)
          lc_type == LaneChangeModuleType::AVOIDANCE_BY_LANE_CHANGE;
 }
 
-double calcLaneChangeResampleInterval(
-  const double lane_changing_length, const double lane_changing_velocity)
-{
-  constexpr auto min_resampling_points{30.0};
-  constexpr auto resampling_dt{0.2};
-  return std::max(
-    lane_changing_length / min_resampling_points, lane_changing_velocity * resampling_dt);
-}
-
-void setPrepareVelocity(
+void set_prepare_velocity(
   PathWithLaneId & prepare_segment, const double current_velocity, const double prepare_velocity)
 {
-  if (current_velocity < prepare_velocity) {
-    // acceleration
-    for (auto & point : prepare_segment.points) {
-      point.point.longitudinal_velocity_mps =
-        std::min(point.point.longitudinal_velocity_mps, static_cast<float>(prepare_velocity));
-    }
-  } else {
+  if (current_velocity >= prepare_velocity) {
     // deceleration
     prepare_segment.points.back().point.longitudinal_velocity_mps = std::min(
       prepare_segment.points.back().point.longitudinal_velocity_mps,
       static_cast<float>(prepare_velocity));
+    return;
+  }
+  // acceleration
+  for (auto & point : prepare_segment.points) {
+    point.point.longitudinal_velocity_mps =
+      std::min(point.point.longitudinal_velocity_mps, static_cast<float>(prepare_velocity));
   }
 }
 
@@ -128,32 +149,7 @@ lanelet::ConstLanelets get_target_neighbor_lanes(
       }
     }
   }
-
   return neighbor_lanes;
-}
-
-bool isPathInLanelets(
-  const PathWithLaneId & path, const lanelet::ConstLanelets & current_lanes,
-  const lanelet::ConstLanelets & target_lanes)
-{
-  const auto current_lane_poly =
-    lanelet::utils::getPolygonFromArcLength(current_lanes, 0, std::numeric_limits<double>::max());
-  const auto target_lane_poly =
-    lanelet::utils::getPolygonFromArcLength(target_lanes, 0, std::numeric_limits<double>::max());
-  const auto current_lane_poly_2d = lanelet::utils::to2D(current_lane_poly).basicPolygon();
-  const auto target_lane_poly_2d = lanelet::utils::to2D(target_lane_poly).basicPolygon();
-  for (const auto & pt : path.points) {
-    const lanelet::BasicPoint2d ll_pt(pt.point.pose.position.x, pt.point.pose.position.y);
-    const auto is_in_current = boost::geometry::covered_by(ll_pt, current_lane_poly_2d);
-    if (is_in_current) {
-      continue;
-    }
-    const auto is_in_target = boost::geometry::covered_by(ll_pt, target_lane_poly_2d);
-    if (!is_in_target) {
-      return false;
-    }
-  }
-  return true;
 }
 
 bool path_footprint_exceeds_target_lane_bound(
@@ -184,152 +180,6 @@ bool path_footprint_exceeds_target_lane_bound(
   }
 
   return false;
-}
-
-std::optional<LaneChangePath> construct_candidate_path(
-  const CommonDataPtr & common_data_ptr, const LaneChangeInfo & lane_change_info,
-  const PathWithLaneId & prepare_segment, const PathWithLaneId & target_lane_reference_path,
-  const std::vector<std::vector<int64_t>> & sorted_lane_ids)
-{
-  const auto & shift_line = lane_change_info.shift_line;
-  const auto terminal_lane_changing_velocity = lane_change_info.terminal_lane_changing_velocity;
-  const auto longitudinal_acceleration = lane_change_info.longitudinal_acceleration;
-  const auto lane_change_velocity = lane_change_info.velocity;
-
-  PathShifter path_shifter;
-  path_shifter.setPath(target_lane_reference_path);
-  path_shifter.addShiftLine(shift_line);
-  path_shifter.setLongitudinalAcceleration(longitudinal_acceleration.lane_changing);
-  ShiftedPath shifted_path;
-
-  // offset front side
-  bool offset_back = false;
-
-  const auto initial_lane_changing_velocity = lane_change_velocity.lane_changing;
-  path_shifter.setVelocity(initial_lane_changing_velocity);
-  path_shifter.setLateralAccelerationLimit(std::abs(lane_change_info.lateral_acceleration));
-
-  if (!path_shifter.generate(&shifted_path, offset_back)) {
-    RCLCPP_DEBUG(get_logger(), "Failed to generate shifted path.");
-  }
-
-  // TODO(Zulfaqar Azmi): have to think of a more feasible solution for points being remove by path
-  // shifter.
-  if (shifted_path.path.points.size() < shift_line.end_idx + 1) {
-    RCLCPP_DEBUG(get_logger(), "Path points are removed by PathShifter.");
-    return std::nullopt;
-  }
-
-  LaneChangePath candidate_path;
-  candidate_path.info = lane_change_info;
-
-  const auto lane_change_end_idx = autoware::motion_utils::findNearestIndex(
-    shifted_path.path.points, candidate_path.info.lane_changing_end);
-
-  if (!lane_change_end_idx) {
-    RCLCPP_DEBUG(get_logger(), "Lane change end idx not found on target path.");
-    return std::nullopt;
-  }
-
-  for (size_t i = 0; i < shifted_path.path.points.size(); ++i) {
-    auto & point = shifted_path.path.points.at(i);
-    if (i < *lane_change_end_idx) {
-      point.lane_ids = replaceWithSortedIds(point.lane_ids, sorted_lane_ids);
-      point.point.longitudinal_velocity_mps = std::min(
-        point.point.longitudinal_velocity_mps, static_cast<float>(terminal_lane_changing_velocity));
-      continue;
-    }
-    const auto nearest_idx =
-      autoware::motion_utils::findNearestIndex(target_lane_reference_path.points, point.point.pose);
-    point.lane_ids = target_lane_reference_path.points.at(*nearest_idx).lane_ids;
-  }
-
-  // TODO(Yutaka Shimizu): remove this flag after make the isPathInLanelets faster
-  const bool enable_path_check_in_lanelet = false;
-
-  // check candidate path is in lanelet
-  const auto & current_lanes = common_data_ptr->lanes_ptr->current;
-  const auto & target_lanes = common_data_ptr->lanes_ptr->target;
-  if (
-    enable_path_check_in_lanelet &&
-    !isPathInLanelets(shifted_path.path, current_lanes, target_lanes)) {
-    return std::nullopt;
-  }
-
-  if (prepare_segment.points.size() > 1 && shifted_path.path.points.size() > 1) {
-    const auto & prepare_segment_second_last_point =
-      std::prev(prepare_segment.points.end() - 1)->point.pose;
-    const auto & lane_change_start_from_shifted =
-      std::next(shifted_path.path.points.begin())->point.pose;
-    const auto yaw_diff2 = std::abs(autoware::universe_utils::normalizeRadian(
-      tf2::getYaw(prepare_segment_second_last_point.orientation) -
-      tf2::getYaw(lane_change_start_from_shifted.orientation)));
-    if (yaw_diff2 > autoware::universe_utils::deg2rad(5.0)) {
-      RCLCPP_DEBUG(
-        get_logger(), "Excessive yaw difference %.3f which exceeds the 5 degrees threshold.",
-        autoware::universe_utils::rad2deg(yaw_diff2));
-      return std::nullopt;
-    }
-  }
-
-  candidate_path.path = utils::combinePath(prepare_segment, shifted_path.path);
-  candidate_path.shifted_path = shifted_path;
-
-  return std::optional<LaneChangePath>{candidate_path};
-}
-
-PathWithLaneId get_reference_path_from_target_Lane(
-  const CommonDataPtr & common_data_ptr, const Pose & lane_changing_start_pose,
-  const double lane_changing_length, const double resample_interval)
-{
-  const auto & route_handler = *common_data_ptr->route_handler_ptr;
-  const auto & target_lanes = common_data_ptr->lanes_ptr->target;
-  const auto target_lane_length = common_data_ptr->transient_data.target_lane_length;
-  const auto is_goal_in_route = common_data_ptr->lanes_ptr->target_lane_in_goal_section;
-  const auto next_lc_buffer = common_data_ptr->transient_data.next_dist_buffer.min;
-  const auto forward_path_length = common_data_ptr->bpp_param_ptr->forward_path_length;
-
-  const ArcCoordinates lane_change_start_arc_position =
-    lanelet::utils::getArcCoordinates(target_lanes, lane_changing_start_pose);
-
-  const double s_start = lane_change_start_arc_position.length;
-  const double s_end = std::invoke([&]() {
-    const auto dist_from_lc_start = s_start + lane_changing_length + forward_path_length;
-    if (is_goal_in_route) {
-      const double s_goal =
-        lanelet::utils::getArcCoordinates(target_lanes, route_handler.getGoalPose()).length -
-        next_lc_buffer;
-      return std::min(dist_from_lc_start, s_goal);
-    }
-    return std::min(dist_from_lc_start, target_lane_length - next_lc_buffer);
-  });
-
-  constexpr double epsilon = 1e-4;
-  if (s_end - s_start + epsilon < lane_changing_length) {
-    return PathWithLaneId();
-  }
-
-  const auto lane_changing_reference_path =
-    route_handler.getCenterLinePath(target_lanes, s_start, s_end);
-
-  return utils::resamplePathWithSpline(
-    lane_changing_reference_path, resample_interval, true, {0.0, lane_changing_length});
-}
-
-ShiftLine get_lane_changing_shift_line(
-  const Pose & lane_changing_start_pose, const Pose & lane_changing_end_pose,
-  const PathWithLaneId & reference_path, const double shift_length)
-{
-  ShiftLine shift_line;
-  shift_line.end_shift_length = shift_length;
-  shift_line.start = lane_changing_start_pose;
-  shift_line.end = lane_changing_end_pose;
-  shift_line.start_idx = autoware::motion_utils::findNearestIndex(
-    reference_path.points, lane_changing_start_pose.position);
-  shift_line.end_idx = autoware::motion_utils::findNearestIndex(
-    reference_path.points, lane_changing_end_pose.position);
-
-  return shift_line;
 }
 
 std::vector<DrivableLanes> generateDrivableLanes(
@@ -370,125 +220,6 @@ std::vector<DrivableLanes> generateDrivableLanes(
     DrivableLanes drivable_lane;
     drivable_lane.left_lane = lc_lane;
     drivable_lane.right_lane = lc_lane;
-    drivable_lanes.push_back(drivable_lane);
-  }
-
-  return drivable_lanes;
-}
-
-std::vector<DrivableLanes> generateDrivableLanes(
-  const std::vector<DrivableLanes> & original_drivable_lanes, const RouteHandler & route_handler,
-  const lanelet::ConstLanelets & current_lanes, const lanelet::ConstLanelets & lane_change_lanes)
-{
-  const auto has_same_lane =
-    [](const lanelet::ConstLanelets & lanes, const lanelet::ConstLanelet & lane) {
-      if (lanes.empty()) return false;
-      const auto has_same = [&](const auto & ll) { return ll.id() == lane.id(); };
-      return std::find_if(lanes.begin(), lanes.end(), has_same) != lanes.end();
-    };
-
-  const auto check_middle = [&](const auto & lane) -> std::optional<DrivableLanes> {
-    for (const auto & drivable_lane : original_drivable_lanes) {
-      if (has_same_lane(drivable_lane.middle_lanes, lane)) {
-        return drivable_lane;
-      }
-    }
-    return std::nullopt;
-  };
-
-  const auto check_left = [&](const auto & lane) -> std::optional<DrivableLanes> {
-    for (const auto & drivable_lane : original_drivable_lanes) {
-      if (drivable_lane.left_lane.id() == lane.id()) {
-        return drivable_lane;
-      }
-    }
-    return std::nullopt;
-  };
-
-  const auto check_right = [&](const auto & lane) -> std::optional<DrivableLanes> {
-    for (const auto & drivable_lane : original_drivable_lanes) {
-      if (drivable_lane.right_lane.id() == lane.id()) {
-        return drivable_lane;
-      }
-    }
-    return std::nullopt;
-  };
-
-  size_t current_lc_idx = 0;
-  std::vector<DrivableLanes> drivable_lanes(current_lanes.size());
-  for (size_t i = 0; i < current_lanes.size(); ++i) {
-    const auto & current_lane = current_lanes.at(i);
-
-    const auto middle_drivable_lane = check_middle(current_lane);
-    if (middle_drivable_lane) {
-      drivable_lanes.at(i) = *middle_drivable_lane;
-    }
-
-    const auto left_drivable_lane = check_left(current_lane);
-    if (left_drivable_lane) {
-      drivable_lanes.at(i) = *left_drivable_lane;
-    }
-
-    const auto right_drivable_lane = check_right(current_lane);
-    if (right_drivable_lane) {
-      drivable_lanes.at(i) = *right_drivable_lane;
-    }
-
-    if (!middle_drivable_lane && !left_drivable_lane && !right_drivable_lane) {
-      drivable_lanes.at(i).left_lane = current_lane;
-      drivable_lanes.at(i).right_lane = current_lane;
-    }
-
-    const auto left_lane = route_handler.getLeftLanelet(current_lane);
-    const auto right_lane = route_handler.getRightLanelet(current_lane);
-    if (!left_lane && !right_lane) {
-      continue;
-    }
-
-    for (size_t lc_idx = current_lc_idx; lc_idx < lane_change_lanes.size(); ++lc_idx) {
-      const auto & lc_lane = lane_change_lanes.at(lc_idx);
-      if (left_lane && lc_lane.id() == left_lane->id()) {
-        if (left_drivable_lane) {
-          drivable_lanes.at(i).left_lane = lc_lane;
-        }
-        current_lc_idx = lc_idx;
-        break;
-      }
-
-      if (right_lane && lc_lane.id() == right_lane->id()) {
-        if (right_drivable_lane) {
-          drivable_lanes.at(i).right_lane = lc_lane;
-        }
-        current_lc_idx = lc_idx;
-        break;
-      }
-    }
-  }
-
-  for (size_t i = current_lc_idx + 1; i < lane_change_lanes.size(); ++i) {
-    const auto & lc_lane = lane_change_lanes.at(i);
-    DrivableLanes drivable_lane;
-
-    const auto middle_drivable_lane = check_middle(lc_lane);
-    if (middle_drivable_lane) {
-      drivable_lane = *middle_drivable_lane;
-    }
-
-    const auto left_drivable_lane = check_left(lc_lane);
-    if (left_drivable_lane) {
-      drivable_lane = *left_drivable_lane;
-    }
-
-    const auto right_drivable_lane = check_right(lc_lane);
-    if (right_drivable_lane) {
-      drivable_lane = *right_drivable_lane;
-    }
-
-    if (!middle_drivable_lane && !left_drivable_lane && !right_drivable_lane) {
-      drivable_lane.left_lane = lc_lane;
-      drivable_lane.right_lane = lc_lane;
-    }
-
     drivable_lanes.push_back(drivable_lane);
   }
 
@@ -561,18 +292,26 @@ std::vector<std::vector<int64_t>> get_sorted_lane_ids(const CommonDataPtr & comm
   return sorted_lane_ids;
 }
 
-std::vector<int64_t> replaceWithSortedIds(
-  const std::vector<int64_t> & original_lane_ids,
-  const std::vector<std::vector<int64_t>> & sorted_lane_ids)
+std::vector<int64_t> replace_with_sorted_ids(
+  const std::vector<int64_t> & current_lane_ids,
+  const std::vector<std::vector<int64_t>> & sorted_lane_ids, std::vector<int64_t> & prev_lane_ids,
+  std::vector<int64_t> & prev_sorted_lane_ids)
 {
-  for (const auto original_id : original_lane_ids) {
+  if (current_lane_ids == prev_lane_ids) {
+    return prev_sorted_lane_ids;
+  }
+
+  for (const auto original_id : current_lane_ids) {
     for (const auto & sorted_id : sorted_lane_ids) {
       if (std::find(sorted_id.cbegin(), sorted_id.cend(), original_id) != sorted_id.cend()) {
-        return sorted_id;
+        prev_lane_ids = current_lane_ids;
+        prev_sorted_lane_ids = sorted_id;
+        return prev_sorted_lane_ids;
       }
     }
   }
-  return original_lane_ids;
+
+  return current_lane_ids;
 }
 
 CandidateOutput assignToCandidate(
@@ -592,70 +331,103 @@ CandidateOutput assignToCandidate(
 std::optional<lanelet::ConstLanelet> get_lane_change_target_lane(
   const CommonDataPtr & common_data_ptr, const lanelet::ConstLanelets & current_lanes)
 {
-  const auto direction = common_data_ptr->direction;
-  const auto route_handler_ptr = common_data_ptr->route_handler_ptr;
-  if (is_mandatory_lane_change(common_data_ptr->lc_type)) {
-    return route_handler_ptr->getLaneChangeTarget(current_lanes, direction);
-  }
-
-  return route_handler_ptr->getLaneChangeTargetExceptPreferredLane(current_lanes, direction);
+  const bool is_mandatory_lc = is_mandatory_lane_change(common_data_ptr->lc_type);
+  return get_target_lane(common_data_ptr, current_lanes, is_mandatory_lc);
 }
 
-std::vector<PoseWithVelocityStamped> convert_to_predicted_path(
-  const CommonDataPtr & common_data_ptr, const LaneChangePath & lane_change_path,
-  const double lane_changing_acceleration)
+std::optional<lanelet::ConstLanelet> get_target_lane_for_mandatory_lane_change(
+  const CommonDataPtr & common_data_ptr, const lanelet::ConstLanelet & ref_lane)
 {
-  if (lane_change_path.path.points.empty()) {
-    return {};
+  const auto direction = common_data_ptr->direction;
+  const auto route_handler_ptr = common_data_ptr->route_handler_ptr;
+  const auto routing_graph_ptr = route_handler_ptr->getRoutingGraphPtr();
+
+  const bool is_intersection_ll = std::invoke([&]() -> bool {
+    const std::string id = ref_lane.attributeOr("intersection_area", "else");
+    return id != "else" && std::atoi(id.c_str());
+  });
+
+  const int num = route_handler_ptr->getNumLaneToPreferredLane(ref_lane, direction);
+  if (num == 0) return std::nullopt;
+  if (direction == Direction::NONE || direction == Direction::RIGHT) {
+    if (num < 0) {
+      const auto right_lanes = is_intersection_ll ? routing_graph_ptr->adjacentRight(ref_lane)
+                                                  : routing_graph_ptr->right(ref_lane);
+      if (right_lanes) return *right_lanes;
+    }
   }
 
-  const auto & path = lane_change_path.path;
-  const auto & vehicle_pose = common_data_ptr->get_ego_pose();
-  const auto & bpp_param_ptr = common_data_ptr->bpp_param_ptr;
-  const auto nearest_seg_idx =
-    autoware::motion_utils::findFirstNearestSegmentIndexWithSoftConstraints(
-      path.points, vehicle_pose, bpp_param_ptr->ego_nearest_dist_threshold,
-      bpp_param_ptr->ego_nearest_yaw_threshold);
+  if (direction == Direction::NONE || direction == Direction::LEFT) {
+    if (num > 0) {
+      const auto left_lanes = is_intersection_ll ? routing_graph_ptr->adjacentLeft(ref_lane)
+                                                 : routing_graph_ptr->left(ref_lane);
+      if (left_lanes) return *left_lanes;
+    }
+  }
+  return std::nullopt;
+}
 
-  const auto vehicle_pose_frenet =
-    convertToFrenetPoint(path.points, vehicle_pose.position, nearest_seg_idx);
+std::optional<lanelet::ConstLanelet> get_target_lane_for_non_mandatory_lane_change(
+  const CommonDataPtr & common_data_ptr, const lanelet::ConstLanelet & ref_lane)
+{
+  const auto direction = common_data_ptr->direction;
+  const auto route_handler_ptr = common_data_ptr->route_handler_ptr;
+  const auto routing_graph_ptr = route_handler_ptr->getRoutingGraphPtr();
 
-  const auto initial_velocity = common_data_ptr->get_ego_speed();
-  const auto prepare_acc = lane_change_path.info.longitudinal_acceleration.prepare;
-  const auto duration = lane_change_path.info.duration.sum();
-  const auto prepare_time = lane_change_path.info.duration.prepare;
-  const auto & lc_param_ptr = common_data_ptr->lc_param_ptr;
-  const auto resolution = lc_param_ptr->safety.collision_check.prediction_time_resolution;
-  std::vector<PoseWithVelocityStamped> predicted_path;
+  if (direction == Direction::RIGHT) {
+    // Get right lanelet if preferred lane is on the left
+    if (route_handler_ptr->getNumLaneToPreferredLane(ref_lane, direction) < 0) {
+      return std::nullopt;
+    }
 
-  // prepare segment
-  for (double t = 0.0; t < prepare_time; t += resolution) {
-    const auto velocity =
-      std::clamp(initial_velocity + prepare_acc * t, 0.0, lane_change_path.info.velocity.prepare);
-    const auto length = initial_velocity * t + 0.5 * prepare_acc * t * t;
-    const auto pose = autoware::motion_utils::calcInterpolatedPose(
-      path.points, vehicle_pose_frenet.length + length);
-    predicted_path.emplace_back(t, pose, velocity);
+    const auto right_lanes = routing_graph_ptr->right(ref_lane);
+    if (right_lanes) {
+      return *right_lanes;
+    }
   }
 
-  // lane changing segment
-  const auto lane_changing_velocity = std::clamp(
-    initial_velocity + prepare_acc * prepare_time, 0.0, lane_change_path.info.velocity.prepare);
-  const auto offset =
-    initial_velocity * prepare_time + 0.5 * prepare_acc * prepare_time * prepare_time;
-  for (double t = prepare_time; t < duration; t += resolution) {
-    const auto delta_t = t - prepare_time;
-    const auto velocity = std::clamp(
-      lane_changing_velocity + lane_changing_acceleration * delta_t, 0.0,
-      lane_change_path.info.velocity.lane_changing);
-    const auto length = lane_changing_velocity * delta_t +
-                        0.5 * lane_changing_acceleration * delta_t * delta_t + offset;
-    const auto pose = autoware::motion_utils::calcInterpolatedPose(
-      path.points, vehicle_pose_frenet.length + length);
-    predicted_path.emplace_back(t, pose, velocity);
+  if (direction == Direction::LEFT) {
+    // Get left lanelet if preferred lane is on the right
+    if (route_handler_ptr->getNumLaneToPreferredLane(ref_lane, direction) > 0) {
+      return std::nullopt;
+    }
+    const auto left_lanes = routing_graph_ptr->left(ref_lane);
+    if (left_lanes) {
+      return *left_lanes;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<lanelet::ConstLanelet> get_target_lane(
+  const CommonDataPtr & common_data_ptr, const lanelet::ConstLanelets & current_lanes,
+  const bool is_mandatory_lc)
+{
+  const auto & ego_pose = common_data_ptr->get_ego_pose();
+  const auto & route_handler_ptr = common_data_ptr->route_handler_ptr;
+  const auto current_lanes_path =
+    route_handler_ptr->getCenterLinePath(current_lanes, 0.0, std::numeric_limits<double>::max());
+
+  auto is_lanelet_behind_ego = [&](const lanelet::ConstLanelet & lanelet) {
+    const auto lanelet_end = lanelet.centerline2d().back().basicPoint2d();
+    const auto lanelet_end_position =
+      autoware_utils::create_point(lanelet_end.x(), lanelet_end.y(), 0.0);
+    const auto dist_from_ego = autoware::motion_utils::calcSignedArcLength(
+      current_lanes_path.points, ego_pose.position, lanelet_end_position);
+    return dist_from_ego < 0.0;
+  };
+
+  for (const auto & lanelet : current_lanes) {
+    if (is_lanelet_behind_ego(lanelet)) continue;
+
+    const auto target_lane =
+      is_mandatory_lc ? get_target_lane_for_mandatory_lane_change(common_data_ptr, lanelet)
+                      : get_target_lane_for_non_mandatory_lane_change(common_data_ptr, lanelet);
+
+    if (target_lane) return target_lane;
   }
 
-  return predicted_path;
+  return std::nullopt;
 }
 
 bool isParkedObject(
@@ -714,7 +486,7 @@ bool isParkedObject(
 
   const auto & obj_pose = object.initial_pose;
   const auto & obj_shape = object.shape;
-  const auto obj_poly = autoware::universe_utils::toPolygon2d(obj_pose, obj_shape);
+  const auto obj_poly = autoware_utils::to_polygon2d(obj_pose, obj_shape);
   const auto obj_point = obj_pose.position;
 
   double max_dist_to_bound = std::numeric_limits<double>::lowest();
@@ -728,7 +500,8 @@ bool isParkedObject(
   const double obj_width = std::max(max_dist_to_bound - min_dist_to_bound, 0.0);
 
   // distance from centerline to the boundary line with object width
-  const auto centerline_pose = lanelet::utils::getClosestCenterPose(closest_lanelet, obj_point);
+  const auto centerline_pose = autoware::experimental::lanelet2_utils::get_closest_center_pose(
+    closest_lanelet, autoware::experimental::lanelet2_utils::from_ros(obj_point));
   const lanelet::BasicPoint3d centerline_point(
     centerline_pose.position.x, centerline_pose.position.y, centerline_pose.position.z);
   const double dist_bound_to_centerline =
@@ -811,6 +584,38 @@ lanelet::BasicPolygon2d create_polygon(
   return lanelet::utils::to2D(polygon_3d).basicPolygon();
 }
 
+std::optional<PredictedPathWithPolygon> transform_predicted_path(
+  const autoware_perception_msgs::msg::PredictedPath & path,
+  const autoware_perception_msgs::msg::Shape & obj_shape, const double obj_normal_velocity,
+  const double time_resolution)
+{
+  if (path.path.empty()) {
+    return std::nullopt;
+  }
+  PredictedPathWithPolygon pred_path_with_poly;
+  pred_path_with_poly.confidence = path.confidence;
+
+  const auto end_time =
+    rclcpp::Duration(path.time_step).seconds() * static_cast<double>(path.path.size() - 1);
+  constexpr auto eps = std::numeric_limits<double>::epsilon();
+  const auto num_iterations = static_cast<size_t>(std::ceil(end_time / time_resolution)) + 1;
+  pred_path_with_poly.path.reserve(num_iterations);
+
+  for (double t = 0.0; t < end_time + eps; t += time_resolution) {
+    if (
+      const auto obj_pose_opt = autoware::object_recognition_utils::calcInterpolatedPose(path, t)) {
+      const auto obj_polygon = autoware_utils::to_polygon2d(*obj_pose_opt, obj_shape);
+      pred_path_with_poly.path.emplace_back(t, *obj_pose_opt, obj_normal_velocity, obj_polygon);
+    }
+  }
+
+  if (pred_path_with_poly.path.empty()) {
+    return std::nullopt;
+  }
+
+  return pred_path_with_poly;
+}
+
 ExtendedPredictedObject transform(
   const PredictedObject & object, const LaneChangeParameters & lane_change_parameters)
 {
@@ -821,22 +626,17 @@ ExtendedPredictedObject transform(
   const double obj_vel_norm =
     std::hypot(extended_object.initial_twist.linear.x, extended_object.initial_twist.linear.y);
 
-  extended_object.predicted_paths.resize(object.kinematics.predicted_paths.size());
-  for (size_t i = 0; i < object.kinematics.predicted_paths.size(); ++i) {
-    const auto & path = object.kinematics.predicted_paths.at(i);
-    const double end_time =
-      rclcpp::Duration(path.time_step).seconds() * static_cast<double>(path.path.size() - 1);
-    extended_object.predicted_paths.at(i).confidence = path.confidence;
+  const auto object_predicted_paths = path_safety_checker::get_object_predicted_paths(
+    object.kinematics.predicted_paths,
+    lane_change_parameters.safety.collision_check.use_all_predicted_paths);
 
-    // create path
-    for (double t = 0.0; t < end_time + std::numeric_limits<double>::epsilon();
-         t += time_resolution) {
-      const auto obj_pose = autoware::object_recognition_utils::calcInterpolatedPose(path, t);
-      if (obj_pose) {
-        const auto obj_polygon = autoware::universe_utils::toPolygon2d(*obj_pose, object.shape);
-        extended_object.predicted_paths.at(i).path.emplace_back(
-          t, *obj_pose, obj_vel_norm, obj_polygon);
-      }
+  extended_object.predicted_paths.reserve(object.kinematics.predicted_paths.size());
+
+  for (const auto & pred_path : object_predicted_paths) {
+    if (
+      const auto ext_path_opt =
+        transform_predicted_path(pred_path, object.shape, obj_vel_norm, time_resolution)) {
+      extended_object.predicted_paths.push_back(*ext_path_opt);
     }
   }
 
@@ -873,7 +673,7 @@ Polygon2d get_ego_footprint(const Pose & ego_pose, const VehicleInfo & ego_info)
   const auto base_to_rear = ego_info.rear_overhang_m;
   const auto width = ego_info.vehicle_width_m;
 
-  return autoware::universe_utils::toFootprint(ego_pose, base_to_front, base_to_rear, width);
+  return autoware_utils::to_footprint(ego_pose, base_to_front, base_to_rear, width);
 }
 
 Point getEgoFrontVertex(
@@ -881,7 +681,7 @@ Point getEgoFrontVertex(
 {
   const double lon_offset = ego_info.wheel_base_m + ego_info.front_overhang_m;
   const double lat_offset = 0.5 * (left ? ego_info.vehicle_width_m : -ego_info.vehicle_width_m);
-  return autoware::universe_utils::calcOffsetPose(ego_pose, lon_offset, lat_offset, 0.0).position;
+  return autoware_utils::calc_offset_pose(ego_pose, lon_offset, lat_offset, 0.0).position;
 }
 
 bool is_within_intersection(
@@ -975,7 +775,31 @@ bool is_same_lane_with_prev_iteration(
          (prev_target_lanes.back().id() == prev_target_lanes.back().id());
 }
 
-bool is_ahead_of_ego(
+MinMaxValue calc_polygon_dist_range_from_terminal_end(
+  const PathWithLaneId & path, const autoware_utils_geometry::Polygon2d & polygon)
+{
+  MinMaxValue dist_from_terminal_end;
+
+  const auto & vertices = polygon.outer();
+  if (path.points.empty() || vertices.empty()) {
+    return {};
+  }
+
+  dist_from_terminal_end.max = -std::numeric_limits<double>::infinity();
+  dist_from_terminal_end.min = std::numeric_limits<double>::infinity();
+
+  for (const auto & vertex : vertices) {
+    const auto vertex_pt = autoware_utils::create_point(vertex.x(), vertex.y(), 0.0);
+    const auto dist_to_end = autoware::motion_utils::calcSignedArcLength(
+      path.points, vertex_pt, path.points.back().point.pose.position);
+    dist_from_terminal_end.min = std::min(dist_to_end, dist_from_terminal_end.min);
+    dist_from_terminal_end.max = std::max(dist_to_end, dist_from_terminal_end.max);
+  }
+
+  return dist_from_terminal_end;
+}
+
+EgoObjectProximity calc_ego_object_proximity(
   const CommonDataPtr & common_data_ptr, const PathWithLaneId & path,
   const ExtendedPredictedObject & object)
 {
@@ -984,28 +808,24 @@ bool is_ahead_of_ego(
     ego_info.max_longitudinal_offset_m + ego_info.rear_overhang_m, object.shape.dimensions.x);
 
   // we don't always have to check the distance accurately.
+  EgoObjectProximity ego_obj_proximity;
   if (std::abs(object.dist_from_ego) > lon_dev) {
-    return object.dist_from_ego >= 0.0;
+    ego_obj_proximity.is_ahead_of_ego = object.dist_from_ego >= 0.0;
+    return ego_obj_proximity;
   }
 
-  const auto & current_footprint = common_data_ptr->transient_data.current_footprint.outer();
-  auto ego_min_dist_to_end = std::numeric_limits<double>::max();
-  for (const auto & ego_edge_point : current_footprint) {
-    const auto ego_edge =
-      autoware::universe_utils::createPoint(ego_edge_point.x(), ego_edge_point.y(), 0.0);
-    const auto dist_to_end = autoware::motion_utils::calcSignedArcLength(
-      path.points, ego_edge, path.points.back().point.pose.position);
-    ego_min_dist_to_end = std::min(dist_to_end, ego_min_dist_to_end);
+  ego_obj_proximity.ego_dist_to_terminal_end =
+    common_data_ptr->transient_data.ego_to_terminal_end_proximity;
+  ego_obj_proximity.object_dist_to_terminal_end =
+    calc_polygon_dist_range_from_terminal_end(path, object.initial_polygon);
+
+  if (ego_obj_proximity.ego_dist_to_terminal_end && ego_obj_proximity.object_dist_to_terminal_end) {
+    ego_obj_proximity.is_ahead_of_ego =
+      (ego_obj_proximity.ego_dist_to_terminal_end->min >=
+       ego_obj_proximity.object_dist_to_terminal_end->max);
   }
 
-  auto current_min_dist_to_end = std::numeric_limits<double>::max();
-  for (const auto & polygon_p : object.initial_polygon.outer()) {
-    const auto obj_p = autoware::universe_utils::createPoint(polygon_p.x(), polygon_p.y(), 0.0);
-    const auto dist_ego_to_obj = autoware::motion_utils::calcSignedArcLength(
-      path.points, obj_p, path.points.back().point.pose.position);
-    current_min_dist_to_end = std::min(dist_ego_to_obj, current_min_dist_to_end);
-  }
-  return ego_min_dist_to_end - current_min_dist_to_end >= 0.0;
+  return ego_obj_proximity;
 }
 
 bool is_before_terminal(
@@ -1028,7 +848,7 @@ bool is_before_terminal(
   }
 
   for (const auto & polygon_p : object.initial_polygon.outer()) {
-    const auto obj_p = autoware::universe_utils::createPoint(polygon_p.x(), polygon_p.y(), 0.0);
+    const auto obj_p = autoware_utils::create_point(polygon_p.x(), polygon_p.y(), 0.0);
     const auto dist_obj_to_terminal =
       autoware::motion_utils::calcSignedArcLength(path.points, obj_p, terminal_position);
     current_max_dist = std::max(dist_obj_to_terminal, current_max_dist);
@@ -1038,13 +858,16 @@ bool is_before_terminal(
 
 double calc_angle_to_lanelet_segment(const lanelet::ConstLanelets & lanelets, const Pose & pose)
 {
-  lanelet::ConstLanelet closest_lanelet;
+  const auto closest_lanelet_opt =
+    autoware::experimental::lanelet2_utils::get_closest_lanelet(lanelets, pose);
 
-  if (!lanelet::utils::query::getClosestLanelet(lanelets, pose, &closest_lanelet)) {
-    return autoware::universe_utils::deg2rad(180);
+  if (!closest_lanelet_opt) {
+    return autoware_utils::deg2rad(180);
   }
-  const auto closest_pose = lanelet::utils::getClosestCenterPose(closest_lanelet, pose.position);
-  return std::abs(autoware::universe_utils::calcYawDeviation(closest_pose, pose));
+  const auto & closest_lanelet = closest_lanelet_opt.value();
+  const auto closest_pose = autoware::experimental::lanelet2_utils::get_closest_center_pose(
+    closest_lanelet, autoware::experimental::lanelet2_utils::from_ros(pose));
+  return std::abs(autoware_utils::calc_yaw_deviation(closest_pose, pose));
 }
 
 double get_distance_to_next_regulatory_element(
@@ -1097,19 +920,17 @@ double get_min_dist_to_current_lanes_obj(
       continue;
     }
 
-    // calculate distance from path front to the stationary object polygon on the ego lane.
-    for (const auto & polygon_p : object.initial_polygon.outer()) {
-      const auto p_fp = autoware::universe_utils::toMsg(polygon_p.to_3d());
-      const auto lateral_fp = motion_utils::calcLateralOffset(path_points, p_fp);
-
-      // ignore if the point is not on ego path
-      if (std::abs(lateral_fp) > (common_data_ptr->bpp_param_ptr->vehicle_width / 2)) {
-        continue;
-      }
-
-      const auto current_distance_to_obj = motion_utils::calcSignedArcLength(path_points, 0, p_fp);
-      min_dist_to_obj = std::min(min_dist_to_obj, current_distance_to_obj);
+    // check if object is on ego path
+    const auto obj_half_width = object.shape.dimensions.y / 2;
+    const auto obj_lat_dist_to_path =
+      std::abs(motion_utils::calcLateralOffset(path_points, object.initial_pose.position)) -
+      obj_half_width;
+    if (obj_lat_dist_to_path > (common_data_ptr->bpp_param_ptr->vehicle_width / 2)) {
+      continue;
     }
+
+    min_dist_to_obj = std::min(min_dist_to_obj, dist_to_obj);
+    break;
   }
   return min_dist_to_obj;
 }
@@ -1144,7 +965,7 @@ std::vector<LineString2d> get_line_string_paths(const ExtendedPredictedObject & 
     const auto & path = predicted_path.path;
     line_string.reserve(path.size());
     for (const auto & path_point : path) {
-      const auto point = universe_utils::fromMsg(path_point.pose.position).to_2d();
+      const auto point = autoware_utils::from_msg(path_point.pose.position).to_2d();
       line_string.push_back(point);
     }
 
@@ -1180,7 +1001,7 @@ bool has_overtaking_turn_lane_object(
 
 bool filter_target_lane_objects(
   const CommonDataPtr & common_data_ptr, const ExtendedPredictedObject & object,
-  const double dist_ego_to_current_lanes_center, const bool ahead_of_ego,
+  const double dist_ego_to_current_lanes_center, const EgoObjectProximity & ego_object_proximity,
   const bool before_terminal, TargetLaneLeadingObjects & leading_objects,
   ExtendedPredictedObjects & trailing_objects)
 {
@@ -1198,6 +1019,8 @@ bool filter_target_lane_objects(
     return std::abs(lateral) > (vehicle_width / 2);
   });
 
+  const auto ahead_of_ego = ego_object_proximity.is_ahead_of_ego;
+
   const auto is_stopped = velocity_filter(
     object.initial_twist, -std::numeric_limits<double>::epsilon(), stopped_obj_vel_th);
   if (is_lateral_far && before_terminal) {
@@ -1207,7 +1030,7 @@ bool filter_target_lane_objects(
        object_path_overlaps_lanes(object, lanes_polygon.target));
 
     if (overlapping_with_target_lanes) {
-      if (!ahead_of_ego && !is_stopped) {
+      if ((!ahead_of_ego && !is_stopped) || ego_object_proximity.is_overlapping()) {
         trailing_objects.push_back(object);
         return true;
       }
@@ -1246,6 +1069,43 @@ bool filter_target_lane_objects(
   return false;
 }
 
+std::vector<lanelet::ConstLanelets> get_preceding_lanes(const CommonDataPtr & common_data_ptr)
+{
+  const auto & route_handler_ptr = common_data_ptr->route_handler_ptr;
+  const auto & target_lanes = common_data_ptr->lanes_ptr->target;
+  const auto & ego_pose = common_data_ptr->get_ego_pose();
+  const auto backward_lane_length = common_data_ptr->lc_param_ptr->backward_lane_length;
+
+  const auto preceding_lanes_list =
+    utils::getPrecedingLanelets(*route_handler_ptr, target_lanes, ego_pose, backward_lane_length);
+
+  const auto & current_lanes = common_data_ptr->lanes_ptr->current;
+  std::unordered_set<lanelet::Id> current_lanes_id;
+  for (const auto & lane : current_lanes) {
+    current_lanes_id.insert(lane.id());
+  }
+  const auto is_overlapping = [&](const lanelet::ConstLanelet & lane) {
+    return current_lanes_id.find(lane.id()) != current_lanes_id.end();
+  };
+
+  std::vector<lanelet::ConstLanelets> non_overlapping_lanes_vec;
+  for (const auto & lanes : preceding_lanes_list) {
+    auto lanes_reversed = lanes | ranges::views::reverse;
+    auto overlapped_itr = ranges::find_if(lanes_reversed, is_overlapping);
+
+    if (overlapped_itr == lanes_reversed.begin()) {
+      continue;
+    }
+
+    // Lanes are not reversed by default. Avoid returning reversed lanes to prevent undefined
+    // behavior.
+    lanelet::ConstLanelets non_overlapping_lanes(overlapped_itr.base(), lanes.end());
+    non_overlapping_lanes_vec.push_back(non_overlapping_lanes);
+  }
+
+  return non_overlapping_lanes_vec;
+}
+
 bool object_path_overlaps_lanes(
   const ExtendedPredictedObject & object, const lanelet::BasicPolygon2d & lanes_polygon)
 {
@@ -1253,4 +1113,350 @@ bool object_path_overlaps_lanes(
     return !boost::geometry::disjoint(path, lanes_polygon);
   });
 }
+
+std::vector<PoseWithVelocityStamped> convert_to_predicted_path(
+  const CommonDataPtr & common_data_ptr, const LaneChangePath & lane_change_path,
+  const double lane_changing_acceleration)
+{
+  if (lane_change_path.path.points.empty()) {
+    return {};
+  }
+
+  const auto & path = lane_change_path.path;
+  const auto & vehicle_pose = common_data_ptr->get_ego_pose();
+  const auto & bpp_param_ptr = common_data_ptr->bpp_param_ptr;
+  const auto ego_arc_length = calc_arc_length(path.points, vehicle_pose, *bpp_param_ptr);
+
+  const auto initial_velocity = common_data_ptr->get_ego_speed();
+  const auto prepare_acc = lane_change_path.info.longitudinal_acceleration.prepare;
+  const auto duration = lane_change_path.info.duration.sum();
+  const auto prepare_time = lane_change_path.info.duration.prepare;
+  const auto & lc_param_ptr = common_data_ptr->lc_param_ptr;
+  const auto resolution = lc_param_ptr->safety.collision_check.prediction_time_resolution;
+  std::vector<PoseWithVelocityStamped> predicted_path;
+  predicted_path.reserve(static_cast<size_t>(std::ceil(duration / resolution)));
+
+  // prepare segment
+  for (double t = 0.0; t < prepare_time; t += resolution) {
+    const auto velocity =
+      std::clamp(initial_velocity + prepare_acc * t, 0.0, lane_change_path.info.velocity.prepare);
+    const auto length = initial_velocity * t + 0.5 * prepare_acc * t * t;
+    const auto pose =
+      autoware::motion_utils::calcInterpolatedPose(path.points, ego_arc_length + length);
+    predicted_path.emplace_back(t, pose, velocity);
+  }
+
+  // lane changing segment
+  const auto lane_changing_velocity = std::clamp(
+    initial_velocity + prepare_acc * prepare_time, 0.0, lane_change_path.info.velocity.prepare);
+  const auto offset =
+    initial_velocity * prepare_time + 0.5 * prepare_acc * prepare_time * prepare_time;
+
+  for (double t = prepare_time; t < duration; t += resolution) {
+    const auto delta_t = t - prepare_time;
+    const auto velocity = std::clamp(
+      lane_changing_velocity + lane_changing_acceleration * delta_t, 0.0,
+      lane_change_path.info.velocity.lane_changing);
+    const auto length = lane_changing_velocity * delta_t +
+                        0.5 * lane_changing_acceleration * delta_t * delta_t + offset;
+    const auto pose =
+      autoware::motion_utils::calcInterpolatedPose(path.points, ego_arc_length + length);
+
+    predicted_path.emplace_back(t, pose, velocity);
+  }
+
+  return predicted_path;
+}
+
+std::vector<PoseWithVelocityStamped> convert_to_predicted_path(
+  const CommonDataPtr & common_data_ptr, const LaneChangePath & lane_change_path)
+{
+  if (lane_change_path.path.points.empty()) {
+    return {};
+  }
+
+  const auto & path = lane_change_path.path;
+  const auto & vehicle_pose = common_data_ptr->get_ego_pose();
+  const auto & bpp_param_ptr = common_data_ptr->bpp_param_ptr;
+  const auto ego_arc_length = calc_arc_length(path.points, vehicle_pose, *bpp_param_ptr);
+
+  const auto & lc_start = lane_change_path.info.lane_changing_start;
+  const auto lc_start_arc_length = calc_arc_length(path.points, lc_start, *bpp_param_ptr);
+
+  const auto & lc_end = lane_change_path.info.lane_changing_end;
+  const auto lc_end_arc_length = calc_arc_length(path.points, lc_end, *bpp_param_ptr);
+
+  const auto initial_velocity = common_data_ptr->get_ego_speed();
+  const auto duration = lane_change_path.info.duration.sum();
+  const auto & lc_param_ptr = common_data_ptr->lc_param_ptr;
+  const auto resolution = lc_param_ptr->safety.collision_check.prediction_time_resolution;
+  std::vector<PoseWithVelocityStamped> predicted_path;
+  predicted_path.reserve(static_cast<size_t>(std::ceil(duration / resolution)));
+  const auto curr_acc = std::max(common_data_ptr->get_current_accel(), 0.0);
+
+  auto prev_vel = initial_velocity;
+  const auto calc_velocity = [&](const auto dt) {
+    auto vel = prev_vel + curr_acc * dt;
+    if (ego_arc_length < lc_start_arc_length) {
+      vel = std::clamp(vel, 0.0, lane_change_path.info.velocity.prepare);
+    } else {
+      vel = std::clamp(
+        vel, lc_param_ptr->trajectory.min_lane_changing_velocity,
+        lane_change_path.info.velocity.lane_changing);
+    }
+    return vel;
+  };
+
+  for (double t = 0.0; t < duration; t += resolution) {
+    const auto velocity = calc_velocity(t);
+    const auto length = velocity * t + 0.5 * curr_acc * t * t;
+    const auto offset = std::min(ego_arc_length + length, lc_end_arc_length);
+    const auto pose = autoware::motion_utils::calcInterpolatedPose(path.points, offset);
+
+    predicted_path.emplace_back(t, pose, velocity);
+    if (offset + std::numeric_limits<double>::epsilon() > lc_end_arc_length) {
+      break;
+    }
+    prev_vel = velocity;
+  }
+
+  return predicted_path;
+}
+
+std::vector<std::vector<PoseWithVelocityStamped>> convert_to_predicted_paths(
+  const CommonDataPtr & common_data_ptr, const LaneChangePath & lane_change_path,
+  const size_t deceleration_sampling_num, const bool is_approved)
+{
+  static constexpr double floating_err_th{1e-3};
+  const auto bpp_param = *common_data_ptr->bpp_param_ptr;
+  const auto global_min_acc = bpp_param.min_acc;
+  const auto lane_changing_acc = lane_change_path.info.longitudinal_acceleration.lane_changing;
+
+  const auto min_acc = std::min(lane_changing_acc, global_min_acc);
+  const auto sampling_num =
+    std::abs(min_acc - lane_changing_acc) > floating_err_th ? deceleration_sampling_num : 1;
+  const auto acc_resolution = (min_acc - lane_changing_acc) / static_cast<double>(sampling_num);
+
+  const auto ego_predicted_path = [&](size_t n) {
+    if (lane_change_path.type == PathType::FrenetPlanner) {
+      return convert_to_predicted_path(
+        common_data_ptr, lane_change_path.frenet_path, deceleration_sampling_num);
+    }
+    auto acc = lane_changing_acc + static_cast<double>(n) * acc_resolution;
+    if (is_approved) {
+      return utils::lane_change::convert_to_predicted_path(common_data_ptr, lane_change_path);
+    }
+    return utils::lane_change::convert_to_predicted_path(common_data_ptr, lane_change_path, acc);
+  };
+
+  return ranges::views::iota(0UL, sampling_num) | ranges::views::transform(ego_predicted_path) |
+         ranges::to<std::vector>();
+}
+
+std::vector<PoseWithVelocityStamped> convert_to_predicted_path(
+  const CommonDataPtr & common_data_ptr, const lane_change::TrajectoryGroup & frenet_candidate,
+  [[maybe_unused]] const size_t deceleration_sampling_num)
+{
+  const auto initial_velocity = common_data_ptr->get_ego_speed();
+  const auto prepare_time = frenet_candidate.prepare_metric.duration;
+  const auto resolution =
+    common_data_ptr->lc_param_ptr->safety.collision_check.prediction_time_resolution;
+  const auto prepare_acc = frenet_candidate.prepare_metric.sampled_lon_accel;
+  std::vector<PoseWithVelocityStamped> predicted_path;
+  const auto & path = frenet_candidate.prepare.points;
+  const auto & vehicle_pose = common_data_ptr->get_ego_pose();
+  const auto & bpp_param_ptr = common_data_ptr->bpp_param_ptr;
+
+  const auto ego_arc_length = calc_arc_length(path, vehicle_pose, *bpp_param_ptr);
+
+  for (double t = 0.0; t < prepare_time; t += resolution) {
+    const auto velocity =
+      std::clamp(initial_velocity + prepare_acc * t, 0.0, frenet_candidate.prepare_metric.velocity);
+    const auto length = initial_velocity * t + 0.5 * prepare_acc * t * t;
+    const auto pose = autoware::motion_utils::calcInterpolatedPose(path, ego_arc_length + length);
+    predicted_path.emplace_back(t, pose, velocity);
+  }
+
+  const auto & poses = frenet_candidate.lane_changing.poses;
+  const auto & velocities = frenet_candidate.lane_changing.longitudinal_velocities;
+  const auto & times = frenet_candidate.lane_changing.times;
+
+  for (const auto [t, pose, velocity] :
+       ranges::views::zip(times, poses, velocities) | ranges::views::drop(1)) {
+    predicted_path.emplace_back(prepare_time + t, pose, velocity);
+  }
+
+  return predicted_path;
+}
+
+bool is_valid_start_point(const lane_change::CommonDataPtr & common_data_ptr, const Pose & pose)
+{
+  const lanelet::BasicPoint2d lc_start_point(pose.position.x, pose.position.y);
+
+  const auto & target_neighbor_poly = common_data_ptr->lanes_polygon_ptr->target_neighbor;
+  const auto & target_lane_poly = common_data_ptr->lanes_polygon_ptr->target;
+
+  // Check the target lane because the previous approved path might be shifted by avoidance module
+  return boost::geometry::covered_by(lc_start_point, target_neighbor_poly) ||
+         boost::geometry::covered_by(lc_start_point, target_lane_poly);
+}
+
+bool is_moving_object(const CommonDataPtr & common_data_ptr, const ExtendedPredictedObject & object)
+{
+  return object.initial_twist.linear.x >
+         common_data_ptr->lc_param_ptr->safety.th_stopped_object_velocity;
+}
+
+bool is_lanelet_in_lanelet_collections(
+  const lanelet::ConstLanelets & lanelet_collections, const lanelet::ConstLanelet & lanelet)
+{
+  return std::any_of(
+    lanelet_collections.begin(), lanelet_collections.end(),
+    [&](const auto & lane) { return lane.id() == lanelet.id(); });
+}
+
+void trim_preferred_after_alternative(
+  lanelet::ConstLanelets & base_lanes, const lanelet::ConstLanelets & preferred_lanes)
+{
+  // Build lookup set
+  std::unordered_set<lanelet::Id> preferred_ids;
+  for (const auto & l : preferred_lanes) {
+    preferred_ids.insert(l.id());
+  }
+
+  auto is_preferred = [&](const lanelet::ConstLanelet & ll) {
+    return preferred_ids.count(ll.id()) == 1;
+  };
+
+  auto is_alternative = [&](const lanelet::ConstLanelet & ll) {
+    return preferred_ids.count(ll.id()) == 0;
+  };
+
+  auto first_alt_it = ranges::find_if(base_lanes, is_alternative);
+  if (first_alt_it == base_lanes.end()) {
+    return;
+  }
+
+  auto first_pref_after_alt_it =
+    ranges::find_if(ranges::make_subrange(std::next(first_alt_it), base_lanes.end()), is_preferred);
+
+  if (first_pref_after_alt_it == base_lanes.end()) {
+    return;
+  }
+
+  base_lanes.erase(first_pref_after_alt_it, base_lanes.end());
+}
+
+std::vector<lanelet::ConstLineString3d> get_no_lane_change_lines(
+  const lanelet::ConstLanelets & target_lanes, const Direction direction)
+{
+  std::vector<lanelet::ConstLineString3d> no_lane_change_lines;
+  no_lane_change_lines.reserve(target_lanes.size());
+
+  for (const auto & ll : target_lanes) {
+    const auto & ls = (direction == Direction::LEFT) ? ll.leftBound() : ll.rightBound();
+
+    // 1. Check if the physical line is solid
+    const bool is_solid =
+      (ls.attributeOr(lanelet::AttributeName::Subtype, "") == lanelet::AttributeValueString::Solid);
+
+    // 2. Check for explicit lane_change permission tags
+    const std::string lane_change_val = ls.attributeOr("lane_change", "");
+
+    const bool explicit_no = (lane_change_val == "no");
+    const bool explicit_yes = (lane_change_val == "yes");
+
+    if ((is_solid && !explicit_yes) || explicit_no) {
+      no_lane_change_lines.push_back(ls);
+    }
+  }
+
+  return no_lane_change_lines;
+}
+
+std::vector<std::pair<double, double>> get_interval_dist_no_lane_change_lines(
+  const std::vector<lanelet::ConstLineString3d> & no_lane_change_lines,
+  const PathWithLaneId & centerline_path, const Pose & ego_pose)
+{
+  std::vector<std::pair<double, double>> interval;
+
+  for (const auto & line : no_lane_change_lines) {
+    const auto & start = line.front();
+
+    const auto dist_front = autoware::motion_utils::calcSignedArcLength(
+      centerline_path.points, ego_pose.position,
+      autoware_utils::create_point(start.x(), start.y(), start.z()));
+
+    const auto & back = line.back();
+    const auto dist_back = autoware::motion_utils::calcSignedArcLength(
+      centerline_path.points, ego_pose.position,
+      autoware_utils::create_point(back.x(), back.y(), back.z()));
+
+    if (dist_front <= dist_back) {
+      interval.emplace_back(dist_front, dist_back);
+    } else {
+      interval.emplace_back(dist_back, dist_front);
+    }
+  }
+
+  return interval;
+}
+
+bool is_intersecting_no_lane_change_lines(
+  const CommonDataPtr & common_data_ptr, const PhaseInfo lc_length,
+  const std::vector<PathPointWithLaneId> & lane_changing_path)
+{
+  const auto & intervals = common_data_ptr->transient_data.interval_dist_no_lane_change_lines;
+  const auto & lines = common_data_ptr->no_lane_change_lines;
+  const auto buffer = common_data_ptr->lc_param_ptr->lane_change_finish_judge_buffer;
+
+  // intervals are sorted in ascending order
+  if (intervals.empty() || lc_length.prepare >= intervals.back().second) {
+    return false;
+  }
+
+  const auto prepare_length = lc_length.prepare;
+  const auto total_length = lc_length.sum();
+  for (const auto & zip : ranges::views::zip(intervals, lines)) {
+    const auto & interval = std::get<0>(zip);
+    const auto [interval_start, interval_end] = interval;
+
+    const auto interval_upper_bound = interval_end + buffer;
+    if (prepare_length >= interval_upper_bound) {
+      continue;
+    }
+
+    const auto interval_lower_bound = interval_start - buffer;
+    // intervals are sorted in ascending order
+    if (total_length <= interval_lower_bound) {
+      return false;
+    }
+
+    const auto & line = std::get<1>(zip);
+
+    bool is_intersecting =
+      ranges::any_of(ranges::views::sliding(lane_changing_path, 2), [&](const auto & path_segment) {
+        const auto & path_p1 = path_segment[0].point.pose.position;
+        const auto & path_p2 = path_segment[1].point.pose.position;
+
+        for (size_t i = 0; i + 1 < line.size(); ++i) {
+          const auto line_p1 = lanelet::utils::conversion::toGeomMsgPt(line[i]);
+          const auto line_p2 = lanelet::utils::conversion::toGeomMsgPt(line[i + 1]);
+
+          if (autoware_utils_geometry::intersect(path_p1, path_p2, line_p1, line_p2).has_value()) {
+            return true;
+          }
+        }
+
+        return false;
+      });
+
+    if (is_intersecting) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 }  // namespace autoware::behavior_path_planner::utils::lane_change
