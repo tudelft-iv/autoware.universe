@@ -16,8 +16,8 @@
 #define OCCUPANCY_GRID_MAP_OUTLIER_FILTER_NODE_HPP_
 
 #include "autoware/pointcloud_preprocessor/filter.hpp"
-#include "autoware/universe_utils/ros/published_time_publisher.hpp"
-#include "autoware/universe_utils/system/time_keeper.hpp"
+#include "autoware_utils/ros/published_time_publisher.hpp"
+#include "autoware_utils/system/time_keeper.hpp"
 
 #include <pcl/common/impl/common.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -55,8 +55,8 @@ public:
   void filter(
     const PointCloud2 & input, const Pose & pose, PointCloud2 & output, PointCloud2 & outlier);
   void filter(
-    const PointCloud2 & high_conf_input, const PointCloud2 & low_conf_input, const Pose & pose,
-    PointCloud2 & output, PointCloud2 & outlier);
+    const PointCloud2 & high_conf_xyz_cloud, const PointCloud2 & low_conf_xyz_cloud,
+    const Pose & pose, PointCloud2 & output, PointCloud2 & outlier);
 
 private:
   float search_radius_;
@@ -74,8 +74,7 @@ public:
 
 private:
   void onOccupancyGridMapAndPointCloud2(
-    const OccupancyGrid::ConstSharedPtr & input_occupancy_grid_map,
-    const PointCloud2::ConstSharedPtr & input_pointcloud);
+    const OccupancyGrid::ConstSharedPtr & input_ogm, const PointCloud2::ConstSharedPtr & input_pc);
   void filterByOccupancyGridMap(
     const OccupancyGrid & occupancy_grid_map, const PointCloud2 & pointcloud,
     PointCloud2 & high_confidence, PointCloud2 & low_confidence, PointCloud2 & out_ogm);
@@ -96,7 +95,7 @@ private:
 
   private:
     void transformToBaseLink(
-      const PointCloud2 & input, const Header & header, PointCloud2 & output);
+      const PointCloud2 & pointcloud_input, const Header & header, PointCloud2 & output);
     rclcpp::Publisher<PointCloud2>::SharedPtr outlier_pointcloud_pub_;
     rclcpp::Publisher<PointCloud2>::SharedPtr low_confidence_pointcloud_pub_;
     rclcpp::Publisher<PointCloud2>::SharedPtr high_confidence_pointcloud_pub_;
@@ -121,9 +120,9 @@ private:
 
   // Debugger
   std::shared_ptr<Debugger> debugger_ptr_;
-  std::unique_ptr<autoware::universe_utils::StopWatch<std::chrono::milliseconds>> stop_watch_ptr_;
-  std::unique_ptr<autoware::universe_utils::DebugPublisher> debug_publisher_;
-  std::unique_ptr<autoware::universe_utils::PublishedTimePublisher> published_time_publisher_;
+  std::unique_ptr<autoware_utils::StopWatch<std::chrono::milliseconds>> stop_watch_ptr_;
+  std::unique_ptr<autoware_utils::DebugPublisher> debug_publisher_;
+  std::unique_ptr<autoware_utils::PublishedTimePublisher> published_time_publisher_;
 
   // ROS Parameters
   std::string map_frame_;
@@ -131,9 +130,9 @@ private:
   int cost_threshold_;
 
   // time keeper
-  rclcpp::Publisher<autoware::universe_utils::ProcessingTimeDetail>::SharedPtr
+  rclcpp::Publisher<autoware_utils::ProcessingTimeDetail>::SharedPtr
     detailed_processing_time_publisher_;
-  std::shared_ptr<autoware::universe_utils::TimeKeeper> time_keeper_;
+  std::shared_ptr<autoware_utils::TimeKeeper> time_keeper_;
 };
 }  // namespace autoware::occupancy_grid_map_outlier_filter
 

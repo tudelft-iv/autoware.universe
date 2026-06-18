@@ -1,4 +1,4 @@
-// Copyright 2020 Tier IV, Inc.
+// Copyright 2020 TIER IV, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,9 +17,10 @@
 #include <autoware/behavior_velocity_planner_common/utilization/util.hpp>
 #include <autoware/motion_utils/trajectory/path_with_lane_id.hpp>
 #include <autoware/motion_utils/trajectory/trajectory.hpp>
-#include <autoware/universe_utils/geometry/boost_geometry.hpp>
-#include <autoware/universe_utils/geometry/geometry.hpp>
+#include <autoware/trajectory/utils/crossed.hpp>
 #include <autoware_lanelet2_extension/utility/query.hpp>
+#include <autoware_utils/geometry/boost_geometry.hpp>
+#include <autoware_utils/geometry/geometry.hpp>
 
 #include <autoware_perception_msgs/msg/predicted_objects.hpp>
 
@@ -50,13 +51,14 @@ namespace autoware::behavior_velocity_planner
 {
 namespace bg = boost::geometry;
 using autoware::motion_utils::calcSignedArcLength;
-using autoware::universe_utils::createPoint;
-using autoware::universe_utils::Line2d;
-using autoware::universe_utils::Point2d;
+using autoware_utils::create_point;
+using autoware_utils::Line2d;
+using autoware_utils::Point2d;
 
 std::vector<std::pair<int64_t, lanelet::ConstLanelet>> getCrosswalksOnPath(
   const geometry_msgs::msg::Pose & current_pose,
-  const tier4_planning_msgs::msg::PathWithLaneId & path, const lanelet::LaneletMapPtr lanelet_map,
+  const autoware_internal_planning_msgs::msg::PathWithLaneId & path,
+  const lanelet::LaneletMapPtr lanelet_map,
   const std::shared_ptr<const lanelet::routing::RoutingGraphContainer> & overall_graphs)
 {
   std::vector<std::pair<lanelet::Id, lanelet::ConstLanelet>> crosswalks;
@@ -93,7 +95,8 @@ std::vector<std::pair<int64_t, lanelet::ConstLanelet>> getCrosswalksOnPath(
 
 std::set<lanelet::Id> getCrosswalkIdSetOnPath(
   const geometry_msgs::msg::Pose & current_pose,
-  const tier4_planning_msgs::msg::PathWithLaneId & path, const lanelet::LaneletMapPtr lanelet_map,
+  const autoware_internal_planning_msgs::msg::PathWithLaneId & path,
+  const lanelet::LaneletMapPtr lanelet_map,
   const std::shared_ptr<const lanelet::routing::RoutingGraphContainer> & overall_graphs)
 {
   std::set<lanelet::Id> crosswalk_id_set;
@@ -142,10 +145,10 @@ getPathEndPointsOnCrosswalk(
 
   const auto compare = [&](const Point2d & p1, const Point2d & p2) {
     const auto dist_l1 =
-      calcSignedArcLength(ego_path.points, size_t(0), createPoint(p1.x(), p1.y(), ego_pos.z));
+      calcSignedArcLength(ego_path.points, size_t(0), create_point(p1.x(), p1.y(), ego_pos.z));
 
     const auto dist_l2 =
-      calcSignedArcLength(ego_path.points, size_t(0), createPoint(p2.x(), p2.y(), ego_pos.z));
+      calcSignedArcLength(ego_path.points, size_t(0), create_point(p2.x(), p2.y(), ego_pos.z));
 
     return dist_l1 < dist_l2;
   };
@@ -159,8 +162,33 @@ getPathEndPointsOnCrosswalk(
   const auto & front_intersects = intersects.front();
   const auto & back_intersects = intersects.back();
   return std::make_pair(
-    createPoint(front_intersects.x(), front_intersects.y(), ego_pos.z),
-    createPoint(back_intersects.x(), back_intersects.y(), ego_pos.z));
+    create_point(front_intersects.x(), front_intersects.y(), ego_pos.z),
+    create_point(back_intersects.x(), back_intersects.y(), ego_pos.z));
+}
+
+/**
+ * @brief Calculate path end (= first and last) points on the crosswalk for continuous trajectory
+ * @return first and last path points on the crosswalk
+ */
+std::optional<std::pair<geometry_msgs::msg::Point, geometry_msgs::msg::Point>>
+getPathEndPointsOnCrosswalk(
+  const autoware::experimental::trajectory::Trajectory<
+    autoware_internal_planning_msgs::msg::PathPointWithLaneId> & ego_path,
+  const lanelet::BasicPolygon2d & polygon, const geometry_msgs::msg::Point & ego_pos)
+{
+  const auto crossed_s_values =
+    autoware::experimental::trajectory::crossed_with_polygon(ego_path, polygon);
+
+  if (crossed_s_values.empty()) {
+    return std::nullopt;
+  }
+
+  const auto first_point = ego_path.compute(crossed_s_values.front());
+  const auto last_point = ego_path.compute(crossed_s_values.back());
+
+  return std::make_pair(
+    create_point(first_point.point.pose.position.x, first_point.point.pose.position.y, ego_pos.z),
+    create_point(last_point.point.pose.position.x, last_point.point.pose.position.y, ego_pos.z));
 }
 
 std::vector<geometry_msgs::msg::Point> getLinestringIntersects(
@@ -193,20 +221,20 @@ std::vector<geometry_msgs::msg::Point> getLinestringIntersects(
 
   const auto compare = [&](const Point2d & p1, const Point2d & p2) {
     const auto dist_l1 =
-      calcSignedArcLength(ego_path.points, size_t(0), createPoint(p1.x(), p1.y(), ego_pos.z));
+      calcSignedArcLength(ego_path.points, size_t(0), create_point(p1.x(), p1.y(), ego_pos.z));
 
     const auto dist_l2 =
-      calcSignedArcLength(ego_path.points, size_t(0), createPoint(p2.x(), p2.y(), ego_pos.z));
+      calcSignedArcLength(ego_path.points, size_t(0), create_point(p2.x(), p2.y(), ego_pos.z));
 
     return dist_l1 < dist_l2;
   };
 
   std::sort(intersects.begin(), intersects.end(), compare);
 
-  // convert autoware::universe_utils::Point2d to geometry::msg::Point
+  // convert autoware_utils::Point2d to geometry::msg::Point
   std::vector<geometry_msgs::msg::Point> geometry_points;
   for (const auto & p : intersects) {
-    geometry_points.push_back(createPoint(p.x(), p.y(), ego_pos.z));
+    geometry_points.push_back(create_point(p.x(), p.y(), ego_pos.z));
   }
   return geometry_points;
 }

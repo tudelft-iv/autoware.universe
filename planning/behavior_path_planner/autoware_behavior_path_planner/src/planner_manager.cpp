@@ -17,9 +17,8 @@
 #include "autoware/behavior_path_planner_common/utils/drivable_area_expansion/static_drivable_area.hpp"
 #include "autoware/behavior_path_planner_common/utils/path_utils.hpp"
 #include "autoware/behavior_path_planner_common/utils/utils.hpp"
-#include "autoware/universe_utils/ros/debug_publisher.hpp"
-#include "autoware/universe_utils/system/stop_watch.hpp"
 
+#include <autoware/lanelet2_utils/nn_search.hpp>
 #include <autoware_lanelet2_extension/utility/query.hpp>
 #include <magic_enum.hpp>
 
@@ -40,7 +39,8 @@ PlannerManager::PlannerManager(rclcpp::Node & node)
     "autoware_behavior_path_planner",
     "autoware::behavior_path_planner::SceneModuleManagerInterface"),
   logger_(node.get_logger().get_child("planner_manager")),
-  clock_(*node.get_clock())
+  clock_(*node.get_clock()),
+  last_valid_reference_path_(std::nullopt)
 {
   current_route_lanelet_ = std::make_shared<std::optional<lanelet::ConstLanelet>>(std::nullopt);
   processing_time_.emplace("total_time", 0.0);
@@ -97,6 +97,25 @@ void PlannerManager::configureModuleSlot(
                 << std::endl;
     }
   }
+}
+
+// This is a temporary process until motion planning can take the terminal pose into account
+bool keep_input_points(const std::vector<std::shared_ptr<SceneModuleStatus>> & statuses)
+{
+  const std::vector<std::string> target_modules = {"goal_planner", "avoidance"};
+
+  const auto target_status = ModuleStatus::RUNNING;
+
+  for (auto & status : statuses) {
+    if (status->is_waiting_approval || status->status == target_status) {
+      if (
+        std::find(target_modules.begin(), target_modules.end(), status->module_name) !=
+        target_modules.end()) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 BehaviorModuleOutput PlannerManager::run(const std::shared_ptr<PlannerData> & data)
@@ -182,10 +201,12 @@ BehaviorModuleOutput PlannerManager::run(const std::shared_ptr<PlannerData> & da
   std::for_each(manager_ptrs_.begin(), manager_ptrs_.end(), [](const auto & m) {
     m->updateObserver();
     m->publishRTCStatus();
-    m->publishSteeringFactor();
-    m->publishVelocityFactor();
+    m->publish_planning_factors();
   });
-
+  // resample the path prior to generating the drivable area
+  result_output.valid_output.path = utils::resamplePathWithSpline(
+    result_output.valid_output.path, data->parameters.output_path_interval,
+    keep_input_points(getSceneModuleStatus()));
   generateCombinedDrivableArea(result_output.valid_output, data);
   return result_output.valid_output;
 }
@@ -256,14 +277,15 @@ void PlannerManager::updateCurrentRouteLanelet(
   const auto lanelet_sequence = route_handler->getLaneletSequence(
     current_route_lanelet_->value(), pose, backward_length, p.forward_path_length);
 
-  const auto could_calculate_closest_lanelet =
-    lanelet::utils::query::getClosestLaneletWithConstrains(
-      lanelet_sequence, pose, &closest_lane, p.ego_nearest_dist_threshold,
-      p.ego_nearest_yaw_threshold) ||
-    lanelet::utils::query::getClosestLanelet(lanelet_sequence, pose, &closest_lane);
-
-  if (could_calculate_closest_lanelet) {
+  auto opt = autoware::experimental::lanelet2_utils::get_closest_lanelet_within_constraint(
+    lanelet_sequence, pose, p.ego_nearest_dist_threshold, p.ego_nearest_yaw_threshold);
+  if (opt.has_value()) {
+    closest_lane = *opt;
     *current_route_lanelet_ = closest_lane;
+  } else if (const auto opt_constraint =
+               experimental::lanelet2_utils::get_closest_lanelet(lanelet_sequence, pose);
+             opt_constraint) {
+    *current_route_lanelet_ = opt_constraint.value();
   } else if (!is_any_approved_module_running) {
     resetCurrentRouteLanelet(data);
   }
@@ -273,6 +295,23 @@ BehaviorModuleOutput PlannerManager::getReferencePath(
   const std::shared_ptr<PlannerData> & data) const
 {
   const auto reference_path = utils::getReferencePath(current_route_lanelet_->value(), data);
+
+  if (reference_path.path.points.empty()) {
+    RCLCPP_WARN_THROTTLE(
+      logger_, clock_, 5000,
+      "Empty reference path detected. Using last valid reference path if available.");
+
+    if (last_valid_reference_path_.has_value()) {
+      return last_valid_reference_path_.value();
+    }
+
+    RCLCPP_WARN_THROTTLE(
+      logger_, clock_, 5000, "No valid previous reference path available. Creating empty path.");
+    return BehaviorModuleOutput{};
+  }
+
+  last_valid_reference_path_ = reference_path;
+
   publishDebugRootReferencePath(reference_path);
   return reference_path;
 }
@@ -282,10 +321,10 @@ void PlannerManager::publishDebugRootReferencePath(
 {
   using visualization_msgs::msg::Marker;
   MarkerArray array;
-  Marker m = autoware::universe_utils::createDefaultMarker(
+  Marker m = autoware_utils::create_default_marker(
     "map", clock_.now(), "root_reference_path", 0UL, Marker::LINE_STRIP,
-    autoware::universe_utils::createMarkerScale(1.0, 1.0, 1.0),
-    autoware::universe_utils::createMarkerColor(1.0, 0.0, 0.0, 1.0));
+    autoware_utils::create_marker_scale(1.0, 1.0, 1.0),
+    autoware_utils::create_marker_color(1.0, 0.0, 0.0, 1.0));
   for (const auto & p : reference_path.path.points) m.points.push_back(p.point.pose.position);
   array.markers.push_back(m);
   m.points.clear();
@@ -764,7 +803,8 @@ BehaviorModuleOutput SubPlannerManager::run(
 }
 
 SlotOutput SubPlannerManager::runApprovedModules(
-  const std::shared_ptr<PlannerData> & data, const BehaviorModuleOutput & upstream_slot_output)
+  const std::shared_ptr<PlannerData> & data, const BehaviorModuleOutput & upstream_slot_output,
+  std::vector<SceneModulePtr> & deleted_modules)
 {
   std::unordered_map<std::string, BehaviorModuleOutput> results;
   BehaviorModuleOutput output = upstream_slot_output;
@@ -833,6 +873,8 @@ SlotOutput SubPlannerManager::runApprovedModules(
       results.erase(m->name());
       debug_info_.scene_status.emplace_back(
         m, SceneModuleUpdateInfo::Action::DELETE, "From Approved");
+      // NOTE(soblin): m is copied, so it is okay to call deleteExpiredModules
+      deleted_modules.push_back(m);
       deleteExpiredModules(m);
     });
     approved_module_ptrs_.erase(failed_itr, approved_module_ptrs_.end());
@@ -874,6 +916,7 @@ SlotOutput SubPlannerManager::runApprovedModules(
     if ((*success_itr)->getCurrentStatus() == ModuleStatus::SUCCESS) {
       debug_info_.scene_status.emplace_back(
         *success_itr, SceneModuleUpdateInfo::Action::DELETE, "From Approved");
+      deleted_modules.push_back(*success_itr);
       deleteExpiredModules(*success_itr);
       success_itr = approved_module_ptrs_.erase(success_itr);
     } else {
@@ -900,7 +943,8 @@ SlotOutput SubPlannerManager::propagateFull(
 
   std::vector<SceneModulePtr> deleted_modules;
   for (size_t itr_num = 0; itr_num < max_iteration_num; ++itr_num) {
-    const auto approved_module_result = runApprovedModules(data, previous_slot_output.valid_output);
+    const auto approved_module_result =
+      runApprovedModules(data, previous_slot_output.valid_output, deleted_modules);
     const auto & approved_module_output = approved_module_result.valid_output;
 
     // these status needs to be propagated to downstream slots
@@ -947,7 +991,9 @@ SlotOutput SubPlannerManager::propagateFull(
 SlotOutput SubPlannerManager::propagateWithExclusiveCandidate(
   const std::shared_ptr<PlannerData> & data, const SlotOutput & previous_slot_output)
 {
-  const auto approved_module_result = runApprovedModules(data, previous_slot_output.valid_output);
+  std::vector<SceneModulePtr> deleted_modules;
+  const auto approved_module_result =
+    runApprovedModules(data, previous_slot_output.valid_output, deleted_modules);
   const auto & approved_module_output = approved_module_result.valid_output;
 
   // these status needs to be propagated to downstream slots

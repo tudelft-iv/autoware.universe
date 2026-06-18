@@ -19,10 +19,11 @@
 
 #include <autoware/behavior_velocity_planner_common/plugin_interface.hpp>
 #include <autoware/behavior_velocity_planner_common/plugin_wrapper.hpp>
-#include <autoware/behavior_velocity_planner_common/scene_module_interface.hpp>
+#include <autoware/behavior_velocity_rtc_interface/scene_module_interface_with_rtc.hpp>
+#include <autoware_lanelet2_extension/regulatory_elements/autoware_traffic_light.hpp>
 #include <rclcpp/rclcpp.hpp>
 
-#include <tier4_planning_msgs/msg/path_with_lane_id.hpp>
+#include <autoware_internal_planning_msgs/msg/path_with_lane_id.hpp>
 
 #include <functional>
 #include <memory>
@@ -37,23 +38,39 @@ public:
 
   const char * getModuleName() override { return "traffic_light"; }
 
+  RequiredSubscriptionInfo getRequiredSubscriptions() const override
+  {
+    RequiredSubscriptionInfo required_subscription_info;
+    required_subscription_info.traffic_signals = true;
+    return required_subscription_info;
+  }
+
 private:
   TrafficLightModule::PlannerParam planner_param_;
 
-  void launchNewModules(const tier4_planning_msgs::msg::PathWithLaneId & path) override;
+  void launchNewModules(const autoware_internal_planning_msgs::msg::PathWithLaneId & path) override;
 
-  std::function<bool(const std::shared_ptr<SceneModuleInterface> &)> getModuleExpiredFunction(
-    const tier4_planning_msgs::msg::PathWithLaneId & path) override;
+  std::function<bool(const std::shared_ptr<SceneModuleInterfaceWithRTC> &)>
+  getModuleExpiredFunction(
+    const autoware_internal_planning_msgs::msg::PathWithLaneId & path) override;
 
-  void modifyPathVelocity(tier4_planning_msgs::msg::PathWithLaneId * path) override;
+  void modifyPathVelocity(autoware_internal_planning_msgs::msg::PathWithLaneId * path) override;
 
   bool isModuleRegisteredFromRegElement(const lanelet::Id & id, const size_t module_id) const;
 
-  bool isModuleRegisteredFromExistingAssociatedModule(const lanelet::Id & id) const;
+  std::shared_ptr<TrafficLightModule> getRegisteredAssociatedModule(const lanelet::Id & id) const;
+
+  bool hasAssociatedTrafficLight(
+    const lanelet::ConstLanelet & lane, const lanelet::Id & registered_id) const;
+
+  std::shared_ptr<TrafficLightModule> findModuleById(const lanelet::Id & module_id) const;
 
   bool hasSameTrafficLight(
     const lanelet::TrafficLightConstPtr element,
     const lanelet::TrafficLightConstPtr registered_element) const;
+
+  bool hasStaticArrow(
+    const std::shared_ptr<const lanelet::autoware::AutowareTrafficLight> & reg_elem) const;
 
   // Debug
   rclcpp::Publisher<autoware_perception_msgs::msg::TrafficLightGroup>::SharedPtr pub_tl_state_;

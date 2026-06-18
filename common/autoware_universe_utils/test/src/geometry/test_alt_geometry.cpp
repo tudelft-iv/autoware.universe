@@ -20,7 +20,7 @@
 #include <boost/geometry/algorithms/correct.hpp>
 #include <boost/geometry/algorithms/touches.hpp>
 #include <boost/geometry/io/wkt/write.hpp>
-#include <boost/geometry/strategies/agnostic/hull_graham_andrew.hpp>
+#include <boost/version.hpp>
 
 #include <gtest/gtest.h>
 
@@ -29,6 +29,9 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#if BOOST_VERSION < 107600  // Header removed in version 1.76.0 (Humble)
+#include <boost/geometry/strategies/agnostic/hull_graham_andrew.hpp>
+#endif
 
 constexpr double epsilon = 1e-6;
 
@@ -163,6 +166,17 @@ TEST(alt_geometry, coveredBy)
     const auto result = covered_by(point, ConvexPolygon2d::create({p1, p2, p3, p4}).value());
 
     EXPECT_TRUE(result);
+  }
+
+  {  // The point is on the extended line of an edge of the polygon
+    const Point2d point = {0.0, 0.0};
+    const Point2d p1 = {3.0, 0.0};
+    const Point2d p2 = {3.0, 1.0};
+    const Point2d p3 = {4.0, 1.0};
+    const Point2d p4 = {4.0, 0.0};
+    const auto result = covered_by(point, ConvexPolygon2d::create({p1, p2, p3, p4}).value());
+
+    EXPECT_FALSE(result);
   }
 }
 
@@ -669,6 +683,17 @@ TEST(alt_geometry, within)
     const Point2d p2 = {2.0, -1.0};
     const Point2d p3 = {0.0, -1.0};
     const Point2d p4 = {0.0, 1.0};
+    const auto result = within(point, ConvexPolygon2d::create({p1, p2, p3, p4}).value());
+
+    EXPECT_FALSE(result);
+  }
+
+  {  // The point is on the extended line of an edge of the polygon
+    const Point2d point = {0.0, 0.0};
+    const Point2d p1 = {3.0, 0.0};
+    const Point2d p2 = {3.0, 1.0};
+    const Point2d p3 = {4.0, 1.0};
+    const Point2d p4 = {4.0, 0.0};
     const auto result = within(point, ConvexPolygon2d::create({p1, p2, p3, p4}).value());
 
     EXPECT_FALSE(result);

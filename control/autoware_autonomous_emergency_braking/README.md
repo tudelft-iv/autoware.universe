@@ -77,7 +77,6 @@ where $v$ and $\omega$ are current longitudinal velocity and angular velocity re
 Since the IMU path generation only uses the ego vehicle's current angular velocity, disregarding the MPC's planner steering, the shape of the IMU path tends to get distorted quite easily and protrude out of the ego vehicle's current lane, possibly causing unwanted emergency stops. There are two countermeasures for this issue:
 
 1. Control using the `max_generated_imu_path_length` parameter
-
    - Generation stops when path length exceeds the set value
    - Avoid using a large `imu_prediction_time_horizon`
 
@@ -115,17 +114,14 @@ Select vehicle vertices for lateral deviation checks based on the following cond
 Execute the following steps at each time step:
 
 1. State Update
-
    - Calculate next position $(x_{k+1}, y_{k+1})$ and yaw angle $\theta_{k+1}$ based on current velocity $v$ and angular velocity $\omega$
    - Time interval $dt$ is based on the `imu_prediction_time_interval` parameter
 
 2. Vehicle Footprint Generation
-
    - Place vehicle footprint at calculated position
    - Calculate check point coordinates
 
 3. Lateral Deviation Calculation
-
    - Calculate lateral deviation from selected vertex to path
    - Update path length and elapsed time
 
@@ -136,12 +132,10 @@ Execute the following steps at each time step:
 Path generation terminates when any of the following conditions are met:
 
 1. Basic Termination Conditions (both must be satisfied)
-
    - Predicted time exceeds `imu_prediction_time_horizon`
    - AND path length exceeds `min_generated_imu_path_length`
 
 2. Path Length Termination Condition
-
    - Path length exceeds `max_generated_imu_path_length`
 
 3. Lateral Deviation Termination Condition (when `limit_imu_path_lat_dev = true`)
@@ -235,26 +229,33 @@ $$
 
 where $yaw_{diff}$ is the difference in yaw between the ego path and the displacement vector $$v_{pos} = o_{pos} - prev_{pos} $$ and $v_{ego}$ is the ego's current speed, which accounts for the movement of points caused by the ego moving and not the object. All these equations are performed disregarding the z axis (in 2D).
 
-Note that the object velocity is calculated against the ego's current movement direction. If the object moves in the opposite direction to the ego's movement, the object velocity will be negative, which will reduce the rss distance on the next step.
+Note that the object velocity is calculated against the ego's current movement direction. If the object moves in the opposite direction to the ego's movement, the object velocity will be negative, which will reduce the collision assessment's metrics on the next step.
 
-The resulting estimated object speed is added to a queue of speeds with timestamps. The AEB then checks for expiration of past speed estimations and eliminates expired speed measurements from the queue, the object expiration is determined by checking if the time elapsed since the speed was first added to the queue is larger than the parameter `previous_obstacle_keep_time`. Finally, the median speed of the queue is calculated. The median speed will be used to calculate the RSS distance used for collision checking.
+The AEB module adds the estimated object speed and its timestamp to a speed history queue. The module then checks this queue for expired data. If the time elapsed since a speed measurement was recorded is greater than the `previous_obstacle_keep_time` parameter, the module removes that speed measurement and its timestamp from the queue. Finally, the module calculates the median speed of the remaining speed measurements in the queue. The AEB module uses this median value to determine the braking distance required for collision checking.
 
-### 5. Collision check with target obstacles using RSS distance
+### 5. Collision check with target obstacles
 
-In the fifth step, the AEB module checks for collision with the closest target obstacle using RSS distance.
-Only the closest target object is evaluated because RSS distance is used to determine collision risk. If the nearest target point is deemed safe, all other potential obstacles within the path are also assumed to be safe.
+In the fifth step, the AEB module checks for a potential collision with the closest target object. To do this, the module calculates the minimum safe braking distance required to prevent a rear-end collision.
 
-RSS distance is formulated as:
+The module only evaluates the closest target object because this safe braking distance acts as a threshold for all target objects. If the distance to the nearest target object is determined to be safe, the module assumes that all other objects further along the path are also safe.
+
+The braking distance is formulated as:
 
 $$
-d = v_{ego}*t_{response} + v_{ego}^2/(2*a_{min}) -(sign(v_{obj})) * v_{obj}^2/(2*a_{obj_{min}}) + offset
+d_{braking} = v_{ego}*t_{response} + v_{ego}^2/(2*a_{min}) -(sign(v_{obj})) * v_{obj}^2/(2*a_{obj_{min}}) + offset
 $$
 
-where $v_{ego}$ and $v_{obj}$ is current ego and obstacle velocity, $a_{min}$ and $a_{obj_{min}}$ is ego and object minimum acceleration (maximum deceleration), $t_{response}$ is response time of the ego vehicle to start deceleration. Therefore the distance from the ego vehicle to the obstacle is smaller than this RSS distance $d$, the ego vehicle send emergency stop signals.
+Where:
 
-Only obstacles classified as "targets" (as defined in Step #3) are considered for RSS distance calculations. Among these "target" obstacles, the one closest to the ego vehicle is used for the calculation. If no "target" obstacles are present—meaning no obstacles fall within the ego vehicle's predicted path (determined by its width and an expanded margin)—this step is skipped. Instead, the position of the closest obstacle is recorded for future speed calculations (Step #4). In this scenario, no emergency stop diagnostic message is generated. The process is illustrated in the accompanying diagram.
+- $v_{ego}$ and $v_{obj}$ are the current velocities of the ego vehicle and the obstacle.
+- $a_{min}$ and $a_{obj\_min}$ are the maximum decelerations (minimum accelerations) of the ego vehicle and the obstacle.
+- $t_{response}$ is the response time required for the ego vehicle to begin decelerating.
 
-![rss_check](./image/rss_check.drawio.svg)
+If the actual distance to the obstacle is less than this calculated distance ($d_{braking}$), the AEB module sends an emergency stop signal.
+
+Only objects classified as "targets" (as defined in Step #3) are considered for collision assessment. Among these "target" obstacles, the one closest to the ego vehicle is used for the calculation. If no "target" obstacles are present—meaning no obstacles fall within the ego vehicle's predicted path (determined by its width and an expanded margin)—this step is skipped. Instead, the position of the closest obstacle is recorded for future speed calculations (Step #4). In this scenario, no emergency stop diagnostic message is generated. The process is illustrated in the accompanying diagram.
+
+![braking_distance](./image/braking_distance.drawio.svg)
 
 ### 6. Send emergency stop signals to `/diagnostics`
 
@@ -264,7 +265,7 @@ If AEB detects collision with point cloud obstacles in the previous step, it sen
 
 ### Front vehicle suddenly brakes
 
-The AEB can activate when a vehicle in front suddenly brakes, and a collision is detected by the AEB module. Provided the distance between the ego vehicle and the front vehicle is large enough and the ego’s emergency acceleration value is high enough, it is possible to avoid or soften collisions with vehicles in front that suddenly brake. NOTE: the acceleration used by the AEB to calculate rss_distance is NOT necessarily the acceleration used by the ego while doing an emergency brake. The acceleration used by the real vehicle can be tuned by changing the [mrm_emergency stop jerk and acceleration values](https://github.com/tier4/autoware_launch/blob/d1b2688f2788acab95bb9995d72efd7182e9006a/autoware_launch/config/system/mrm_emergency_stop_operator/mrm_emergency_stop_operator.param.yaml#L4).
+The AEB can activate when a vehicle in front suddenly brakes, and a collision is detected by the AEB module. Provided the distance between the ego vehicle and the front vehicle is large enough and the ego’s emergency acceleration value is high enough, it is possible to avoid or soften collisions with vehicles in front that suddenly brake. NOTE: the acceleration used by the AEB to calculate braking distance is NOT necessarily the acceleration used by the ego while doing an emergency brake. The acceleration used by the real vehicle can be tuned by changing the [mrm_emergency stop jerk and acceleration values](https://github.com/tier4/autoware_launch/blob/d1b2688f2788acab95bb9995d72efd7182e9006a/autoware_launch/config/system/mrm_emergency_stop_operator/mrm_emergency_stop_operator.param.yaml#L4).
 
 ![front vehicle collision prevention](./image/front_vehicle_collision.drawio.svg)
 
@@ -288,37 +289,7 @@ When vehicle odometry information is faulty, it is possible that the MPC fails t
 
 ## Parameters
 
-| Name                               | Unit   | Type   | Description                                                                                                                                                                                     | Default value |
-| :--------------------------------- | :----- | :----- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------ |
-| publish_debug_markers              | [-]    | bool   | flag to publish debug markers                                                                                                                                                                   | true          |
-| publish_debug_pointcloud           | [-]    | bool   | flag to publish the point cloud used for debugging                                                                                                                                              | false         |
-| use_predicted_trajectory           | [-]    | bool   | flag to use the predicted path from the control module                                                                                                                                          | true          |
-| use_imu_path                       | [-]    | bool   | flag to use the predicted path generated by sensor data                                                                                                                                         | true          |
-| use_object_velocity_calculation    | [-]    | bool   | flag to use the object velocity calculation. If set to false, object velocity is set to 0 [m/s]                                                                                                 | true          |
-| check_autoware_state               | [-]    | bool   | flag to enable or disable autoware state check. If set to false, the AEB module will run even when the ego vehicle is not in AUTONOMOUS state.                                                  | true          |
-| detection_range_min_height         | [m]    | double | minimum hight of detection range used for avoiding the ghost brake by false positive point clouds                                                                                               | 0.0           |
-| detection_range_max_height_margin  | [m]    | double | margin for maximum hight of detection range used for avoiding the ghost brake by false positive point clouds. `detection_range_max_height = vehicle_height + detection_range_max_height_margin` | 0.0           |
-| voxel_grid_x                       | [m]    | double | down sampling parameters of x-axis for voxel grid filter                                                                                                                                        | 0.05          |
-| voxel_grid_y                       | [m]    | double | down sampling parameters of y-axis for voxel grid filter                                                                                                                                        | 0.05          |
-| voxel_grid_z                       | [m]    | double | down sampling parameters of z-axis for voxel grid filter                                                                                                                                        | 100000.0      |
-| cluster tolerance                  | [m]    | double | maximum allowable distance between any two points to be considered part of the same cluster                                                                                                     | 0.15          |
-| cluster_minimum_height             | [m]    | double | at least one point in a cluster must be higher than this value for the cluster to be included in the set of possible collision targets                                                          | 0.1           |
-| minimum_cluster_size               | [-]    | int    | minimum required amount of points contained by a cluster for it to be considered as a possible target obstacle                                                                                  | 10            |
-| maximum_cluster_size               | [-]    | int    | maximum amount of points contained by a cluster for it to be considered as a possible target obstacle                                                                                           | 10000         |
-| min_generated_imu_path_length      | [m]    | double | minimum distance for a predicted path generated by sensors                                                                                                                                      | 0.5           |
-| max_generated_imu_path_length      | [m]    | double | maximum distance for a predicted path generated by sensors                                                                                                                                      | 10.0          |
-| expand_width                       | [m]    | double | expansion width of the ego vehicle for collision checking, path cropping and speed calculation                                                                                                  | 0.1           |
-| longitudinal_offset_margin         | [m]    | double | longitudinal offset distance for collision check                                                                                                                                                | 2.0           |
-| t_response                         | [s]    | double | response time for the ego to detect the front vehicle starting deceleration                                                                                                                     | 1.0           |
-| a_ego_min                          | [m/ss] | double | maximum deceleration value of the ego vehicle                                                                                                                                                   | -3.0          |
-| a_obj_min                          | [m/ss] | double | maximum deceleration value of objects                                                                                                                                                           | -3.0          |
-| imu_prediction_time_horizon        | [s]    | double | time horizon of the predicted path generated by sensors                                                                                                                                         | 1.5           |
-| imu_prediction_time_interval       | [s]    | double | time interval of the predicted path generated by sensors                                                                                                                                        | 0.1           |
-| mpc_prediction_time_horizon        | [s]    | double | time horizon of the predicted path generated by mpc                                                                                                                                             | 1.5           |
-| mpc_prediction_time_interval       | [s]    | double | time interval of the predicted path generated by mpc                                                                                                                                            | 0.1           |
-| aeb_hz                             | [-]    | double | frequency at which AEB operates per second                                                                                                                                                      | 10            |
-| speed_calculation_expansion_margin | [m]    | double | expansion width of the ego vehicle footprint used when calculating the closest object's speed                                                                                                   | 0.7           |
-| path_footprint_extra_margin        | [m]    | double | this parameters expands the ego footprint used to crop the AEB input pointcloud                                                                                                                 | 1.0           |
+{{ json_to_markdown("control/autoware_autonomous_emergency_braking/schema/autonomous_emergency_braking.schema.json") }}
 
 ## Limitations
 

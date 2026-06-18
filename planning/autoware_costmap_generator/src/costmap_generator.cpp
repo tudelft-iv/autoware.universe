@@ -46,18 +46,19 @@
 
 #include "autoware/costmap_generator/utils/object_map_utils.hpp"
 
-#include <autoware_lanelet2_extension/utility/message_conversion.hpp>
+#include <autoware/lanelet2_utils/conversion.hpp>
 #include <autoware_lanelet2_extension/utility/query.hpp>
 #include <autoware_lanelet2_extension/utility/utilities.hpp>
 #include <autoware_lanelet2_extension/visualization/visualization.hpp>
 #include <pcl_ros/transforms.hpp>
+#include <rclcpp/clock.hpp>
 #include <rclcpp/logging.hpp>
+#include <tf2/time.hpp>
+#include <tf2/utils.hpp>
 #include <tf2_eigen/tf2_eigen.hpp>
 
 #include <lanelet2_core/Forward.h>
 #include <lanelet2_core/geometry/Polygon.h>
-#include <tf2/time.h>
-#include <tf2/utils.h>
 
 #include <memory>
 #include <string>
@@ -68,14 +69,15 @@ namespace
 
 // Copied from scenario selector
 geometry_msgs::msg::PoseStamped::ConstSharedPtr getCurrentPose(
-  const tf2_ros::Buffer & tf_buffer, const rclcpp::Logger & logger)
+  const tf2_ros::Buffer & tf_buffer, const rclcpp::Logger & logger,
+  const rclcpp::Clock::SharedPtr clock)
 {
   geometry_msgs::msg::TransformStamped tf_current_pose;
 
   try {
     tf_current_pose = tf_buffer.lookupTransform("map", "base_link", tf2::TimePointZero);
   } catch (tf2::TransformException & ex) {
-    RCLCPP_ERROR(logger, "%s", ex.what());
+    RCLCPP_ERROR_THROTTLE(logger, *clock, 5000, "%s", ex.what());
     return nullptr;
   }
 
@@ -171,10 +173,11 @@ CostmapGenerator::CostmapGenerator(const rclcpp::NodeOptions & node_options)
   pub_occupancy_grid_ =
     this->create_publisher<nav_msgs::msg::OccupancyGrid>("~/output/occupancy_grid", 1);
   pub_processing_time_ =
-    create_publisher<autoware::universe_utils::ProcessingTimeDetail>("processing_time", 1);
-  time_keeper_ = std::make_shared<autoware::universe_utils::TimeKeeper>(pub_processing_time_);
+    create_publisher<autoware_utils::ProcessingTimeDetail>("processing_time", 1);
+  time_keeper_ = std::make_shared<autoware_utils::TimeKeeper>(pub_processing_time_);
   pub_processing_time_ms_ =
-    this->create_publisher<tier4_debug_msgs::msg::Float64Stamped>("~/debug/processing_time_ms", 1);
+    this->create_publisher<autoware_internal_debug_msgs::msg::Float64Stamped>(
+      "~/debug/processing_time_ms", 1);
 
   // Timer
   const auto period_ns = rclcpp::Rate(param_->update_rate).period();
@@ -232,8 +235,8 @@ void CostmapGenerator::loadParkingAreasFromLaneletMap(
 void CostmapGenerator::onLaneletMapBin(
   const autoware_map_msgs::msg::LaneletMapBin::ConstSharedPtr msg)
 {
-  lanelet_map_ = std::make_shared<lanelet::LaneletMap>();
-  lanelet::utils::conversion::fromBinMsg(*msg, lanelet_map_);
+  lanelet_map_ = autoware::experimental::lanelet2_utils::remove_const(
+    autoware::experimental::lanelet2_utils::from_autoware_map_msgs(*msg));
 
   if (param_->use_wayarea) {
     loadRoadAreasFromLaneletMap(lanelet_map_, primitives_polygons_);
@@ -246,28 +249,28 @@ void CostmapGenerator::onLaneletMapBin(
 
 void CostmapGenerator::update_data()
 {
-  objects_ = sub_objects_.takeData();
-  points_ = sub_points_.takeData();
-  scenario_ = sub_scenario_.takeData();
+  objects_ = sub_objects_.take_data();
+  points_ = sub_points_.take_data();
+  scenario_ = sub_scenario_.take_data();
 }
 
 void CostmapGenerator::set_current_pose()
 {
-  current_pose_ = getCurrentPose(tf_buffer_, this->get_logger());
+  current_pose_ = getCurrentPose(tf_buffer_, this->get_logger(), this->get_clock());
 }
 
 void CostmapGenerator::onTimer()
 {
   update_data();
 
-  autoware::universe_utils::ScopedTimeTrack scoped_time_track(__func__, *time_keeper_);
+  autoware_utils::ScopedTimeTrack scoped_time_track(__func__, *time_keeper_);
   stop_watch.tic();
 
   if (!param_->activate_by_scenario) set_current_pose();
 
   if (!isActive()) {
     // Publish ProcessingTime
-    tier4_debug_msgs::msg::Float64Stamped processing_time_msg;
+    autoware_internal_debug_msgs::msg::Float64Stamped processing_time_msg;
     processing_time_msg.stamp = get_clock()->now();
     processing_time_msg.data = stop_watch.toc();
     pub_processing_time_ms_->publish(processing_time_msg);
@@ -289,22 +292,22 @@ void CostmapGenerator::onTimer()
   set_grid_center(tf);
 
   if ((param_->use_wayarea || param_->use_parkinglot) && lanelet_map_) {
-    autoware::universe_utils::ScopedTimeTrack st("generatePrimitivesCostmap()", *time_keeper_);
+    autoware_utils::ScopedTimeTrack st("generatePrimitivesCostmap()", *time_keeper_);
     costmap_[LayerName::primitives] = generatePrimitivesCostmap();
   }
 
   if (param_->use_objects && objects_) {
-    autoware::universe_utils::ScopedTimeTrack st("generateObjectsCostmap()", *time_keeper_);
+    autoware_utils::ScopedTimeTrack st("generateObjectsCostmap()", *time_keeper_);
     costmap_[LayerName::objects] = generateObjectsCostmap(objects_);
   }
 
   if (param_->use_points && points_) {
-    autoware::universe_utils::ScopedTimeTrack st("generatePointsCostmap()", *time_keeper_);
+    autoware_utils::ScopedTimeTrack st("generatePointsCostmap()", *time_keeper_);
     costmap_[LayerName::points] = generatePointsCostmap(points_, tf.transform.translation.z);
   }
 
   {
-    autoware::universe_utils::ScopedTimeTrack st("generateCombinedCostmap()", *time_keeper_);
+    autoware_utils::ScopedTimeTrack st("generateCombinedCostmap()", *time_keeper_);
     costmap_[LayerName::combined] = generateCombinedCostmap();
   }
 
@@ -332,7 +335,7 @@ bool CostmapGenerator::isActive()
     if (!scenario_) return false;
     const auto & s = scenario_->activating_scenarios;
     return std::any_of(s.begin(), s.end(), [](const auto scenario) {
-      return scenario == tier4_planning_msgs::msg::Scenario::PARKING;
+      return scenario == autoware_internal_planning_msgs::msg::Scenario::PARKING;
     });
   }
 
@@ -483,7 +486,7 @@ void CostmapGenerator::publishCostmap(
   pub_costmap_->publish(*out_gridmap_msg);
 
   // Publish ProcessingTime
-  tier4_debug_msgs::msg::Float64Stamped processing_time_msg;
+  autoware_internal_debug_msgs::msg::Float64Stamped processing_time_msg;
   processing_time_msg.stamp = get_clock()->now();
   processing_time_msg.data = stop_watch.toc();
   pub_processing_time_ms_->publish(processing_time_msg);

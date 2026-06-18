@@ -18,12 +18,13 @@
 #include "autoware/behavior_path_planner_common/data_manager.hpp"
 #include "autoware/behavior_path_planner_common/utils/path_safety_checker/path_safety_checker_parameters.hpp"
 
+#include <autoware_internal_planning_msgs/msg/path_point_with_lane_id.hpp>
 #include <autoware_perception_msgs/msg/predicted_object.hpp>
 #include <autoware_perception_msgs/msg/predicted_objects.hpp>
-#include <tier4_planning_msgs/msg/path_point_with_lane_id.hpp>
 
 #include <lanelet2_core/geometry/Lanelet.h>
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -31,8 +32,8 @@
 namespace autoware::behavior_path_planner::utils::path_safety_checker::filter
 {
 
+using autoware_internal_planning_msgs::msg::PathPointWithLaneId;
 using autoware_perception_msgs::msg::PredictedObject;
-using tier4_planning_msgs::msg::PathPointWithLaneId;
 
 /**
  * @brief Filters object based on velocity.
@@ -86,9 +87,9 @@ bool is_vehicle(const ObjectClassification & classification);
 namespace autoware::behavior_path_planner::utils::path_safety_checker
 {
 
+using autoware_internal_planning_msgs::msg::PathPointWithLaneId;
 using autoware_perception_msgs::msg::PredictedObject;
 using autoware_perception_msgs::msg::PredictedObjects;
-using tier4_planning_msgs::msg::PathPointWithLaneId;
 
 /**
  * @brief Filters objects based on object centroid position.
@@ -115,7 +116,7 @@ bool isPolygonOverlapLanelet(
   const double yaw_threshold);
 
 bool isPolygonOverlapLanelet(
-  const PredictedObject & object, const autoware::universe_utils::Polygon2d & lanelet_polygon);
+  const PredictedObject & object, const autoware_utils::Polygon2d & lanelet_polygon);
 
 bool isPolygonOverlapLanelet(
   const PredictedObject & object, const lanelet::BasicPolygon2d & lanelet_polygon);
@@ -228,15 +229,79 @@ std::pair<PredictedObjects, PredictedObjects> separateObjectsByLanelets(
   const double yaw_threshold = M_PI);
 
 /**
+ * @brief Gets the predicted path(s) that share the highest confidence score.
+ *
+ * @tparam PredictedPathsType The container type for predicted predicted_paths. Elements
+ * must have a public member named `confidence`.
+ * @param predicted_paths The container of predicted predicted_paths to search. This is passed
+ * by value as the function requires a mutable copy.
+ * @return PredictedPathsType A container with the highest-confidence
+ * path(s)
+ */
+template <typename PredictedPathsType>
+PredictedPathsType get_highest_confidence_paths(PredictedPathsType predicted_paths)
+{
+  if (predicted_paths.empty()) {
+    return predicted_paths;
+  }
+
+  std::sort(predicted_paths.begin(), predicted_paths.end(), [](const auto & p1, const auto & p2) {
+    return p1.confidence > p2.confidence;
+  });
+
+  const auto highest_confidence = predicted_paths.front().confidence;
+
+  // handles if the multiple path have the same highest confidence
+  auto equal_confidence_itr = std::find_if(
+    std::next(predicted_paths.begin()), predicted_paths.end(),
+    [highest_confidence](const auto & p) { return p.confidence != highest_confidence; });
+
+  return {predicted_paths.begin(), equal_confidence_itr};
+}
+
+extern template std::vector<PredictedPathWithPolygon> get_highest_confidence_paths(
+  std::vector<PredictedPathWithPolygon> predicted_paths);
+extern template std::vector<autoware_perception_msgs::msg::PredictedPath>
+get_highest_confidence_paths(
+  std::vector<autoware_perception_msgs::msg::PredictedPath> predicted_paths);
+
+/**
+ * @brief Filters a container of predicted predicted_paths, returning either all predicted_paths or
+ * just the one with the highest confidence.
+ *
+ * @tparam PredictedPathsType The container type for predicted predicted_paths, which must contain
+ * elements with a `confidence` member.
+ * @param predicted_paths The container of predicted predicted_paths to filter.
+ * @param is_use_all_predicted_path Flag to determine whether to return all predicted
+ * predicted_paths or only the one with the maximum confidence.
+ * @return PredictedPathsType A new container with the filtered predicted path(s).
+ */
+template <typename PredictedPathsType>
+PredictedPathsType get_object_predicted_paths(
+  const PredictedPathsType & predicted_paths, const bool is_use_all_predicted_path)
+{
+  return is_use_all_predicted_path ? predicted_paths
+                                   : get_highest_confidence_paths(predicted_paths);
+}
+
+extern template std::vector<PredictedPathWithPolygon> get_object_predicted_paths(
+  const std::vector<PredictedPathWithPolygon> & predicted_paths,
+  const bool is_use_all_predicted_path);
+extern template std::vector<autoware_perception_msgs::msg::PredictedPath>
+get_object_predicted_paths(
+  const std::vector<autoware_perception_msgs::msg::PredictedPath> & predicted_paths,
+  const bool is_use_all_predicted_path);
+
+/**
  * @brief Get the predicted path from an object.
  *
  * @param obj The extended predicted object.
- * @param is_use_all_predicted_path Flag to determine whether to use all predicted paths or just the
- * one with maximum confidence.
+ * @param is_use_all_predicted_path Flag to determine whether to use all predicted predicted_paths
+ * or just the one with maximum confidence.
  * @return std::vector<PredictedPathWithPolygon> The predicted path(s) from the object.
  */
 std::vector<PredictedPathWithPolygon> getPredictedPathFromObj(
-  const ExtendedPredictedObject & obj, const bool & is_use_all_predicted_path);
+  const ExtendedPredictedObject & obj, const bool is_use_all_predicted_path);
 
 /**
  * @brief Create a predicted path using the provided parameters.

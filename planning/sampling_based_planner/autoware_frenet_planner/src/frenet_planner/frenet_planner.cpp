@@ -21,11 +21,10 @@
 #include <autoware_sampler_common/structures.hpp>
 #include <autoware_sampler_common/transform/spline_transform.hpp>
 #include <eigen3/Eigen/Eigen>
+#include <tf2/utils.hpp>
 
 #include "autoware_planning_msgs/msg/path.hpp"
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-
-#include <tf2/utils.h>
 
 #include <algorithm>
 #include <cmath>
@@ -34,7 +33,6 @@
 
 namespace autoware::frenet_planner
 {
-// cppcheck-suppress unusedFunction
 std::vector<Trajectory> generateTrajectories(
   const autoware::sampler_common::transform::Spline2D & reference_spline,
   const FrenetState & initial_state, const SamplingParameters & sampling_parameters)
@@ -135,7 +133,7 @@ void calculateCartesian(
       pose.position.x = it->x();
       pose.position.y = it->y();
       pose.position.z = 0.0;
-      pose.orientation = autoware::universe_utils::createQuaternionFromRPY(0.0, 0.0, yaw);
+      pose.orientation = autoware_utils::create_quaternion_from_rpy(0.0, 0.0, yaw);
       path.poses.push_back(pose);
     }
     path.yaws.push_back(path.yaws.back());
@@ -162,8 +160,9 @@ void calculateCartesian(
     std::vector<double> d_yaws;
     d_yaws.reserve(trajectory.yaws.size());
     for (size_t i = 0; i + 1 < trajectory.yaws.size(); ++i)
-      d_yaws.push_back(autoware::common::helper_functions::wrap_angle(
-        trajectory.yaws[i + 1] - trajectory.yaws[i]));
+      d_yaws.push_back(
+        autoware::common::helper_functions::wrap_angle(
+          trajectory.yaws[i + 1] - trajectory.yaws[i]));
     d_yaws.push_back(0.0);
     // Calculate curvatures
     for (size_t i = 1; i < trajectory.yaws.size(); ++i) {
@@ -196,6 +195,14 @@ void calculateCartesian(
     if (trajectory.longitudinal_accelerations.empty()) {
       trajectory.longitudinal_accelerations.push_back(0.0);
       trajectory.lateral_accelerations.push_back(0.0);
+    }
+    for (auto i = 0UL; i < trajectory.points.size(); ++i) {
+      geometry_msgs::msg::Pose pose;
+      pose.position.x = trajectory.points[i].x();
+      pose.position.y = trajectory.points[i].y();
+      pose.position.z = 0.0;
+      pose.orientation = autoware_utils::create_quaternion_from_rpy(0.0, 0.0, trajectory.yaws[i]);
+      trajectory.poses.push_back(pose);
     }
   }
 }

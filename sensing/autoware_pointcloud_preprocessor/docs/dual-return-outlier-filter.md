@@ -10,7 +10,7 @@ This node can remove rain and fog by considering the light reflected from the ob
 
 ![outlier_filter-return_type](./image/outlier_filter-return_type.drawio.svg)
 
-Therefore, in order to use this node, the sensor driver must publish custom data including `return_type`. please refer to [PointXYZIRCAEDT](../../../common/autoware_point_types/include/autoware_point_types/types.hpp#L95-L116) data structure.
+Therefore, in order to use this node, the sensor driver must publish custom data including `return_type`. please refer to [PointXYZIRCAEDT](https://github.com/autowarefoundation/autoware_core/blob/main/common/autoware_point_types/include/autoware/point_types/types.hpp#L95-L116) data structure.
 
 Another feature of this node is that it publishes visibility as a diagnostic topic. With this function, for example, in heavy rain, the sensing module can notify that the processing performance has reached its limit, which can lead to ensuring the safety of the vehicle.
 
@@ -36,11 +36,11 @@ This implementation inherits `autoware::pointcloud_preprocessor::Filter` class, 
 
 ### Output
 
-| Name                                           | Type                                    | Description                                             |
-| ---------------------------------------------- | --------------------------------------- | ------------------------------------------------------- |
-| `/dual_return_outlier_filter/frequency_image`  | `sensor_msgs::msg::Image`               | The histogram image that represent visibility           |
-| `/dual_return_outlier_filter/visibility`       | `tier4_debug_msgs::msg::Float32Stamped` | A representation of visibility with a value from 0 to 1 |
-| `/dual_return_outlier_filter/pointcloud_noise` | `sensor_msgs::msg::Pointcloud2`         | The pointcloud removed as noise                         |
+| Name                                           | Type                                                | Description                                             |
+| ---------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------- |
+| `/dual_return_outlier_filter/frequency_image`  | `sensor_msgs::msg::Image`                           | The histogram image that represent visibility           |
+| `/dual_return_outlier_filter/visibility`       | `autoware_internal_debug_msgs::msg::Float32Stamped` | A representation of visibility with a value from 0 to 1 |
+| `/dual_return_outlier_filter/pointcloud_noise` | `sensor_msgs::msg::Pointcloud2`                     | The pointcloud removed as noise                         |
 
 ## Parameters
 
@@ -55,7 +55,7 @@ This implementation inherits `autoware::pointcloud_preprocessor::Filter` class, 
 ## Assumptions / Known limits
 
 Not recommended for use as it is under development.
-Input data must be [PointXYZIRCAEDT](../../../common/autoware_point_types/include/autoware_point_types/types.hpp#L95-L116) type data including `return_type`.
+Input data must be [PointXYZIRCAEDT](https://github.com/autowarefoundation/autoware_core/blob/main/common/autoware_point_types/include/autoware/point_types/types.hpp#L95-L116) type data including `return_type`.
 
 ## (Optional) Error detection and handling
 

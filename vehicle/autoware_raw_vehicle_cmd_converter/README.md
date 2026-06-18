@@ -22,7 +22,7 @@ Once the acceleration map is crafted, it should be loaded when the RawVehicleCmd
 
 ### Auto-Calibration Tool
 
-For ease of calibration and adjustments to the lookup table, an auto-calibration tool is available. More information and instructions for this tool can be found [here](https://github.com/autowarefoundation/autoware.universe/blob/main/vehicle/autoware_accel_brake_map_calibrator/README.md).
+For ease of calibration and adjustments to the lookup table, an auto-calibration tool is available. More information and instructions for this tool can be found [here](https://github.com/autowarefoundation/autoware_universe/blob/main/vehicle/autoware_accel_brake_map_calibrator/README.md).
 
 ### Variable Gear Ratio (VGR)
 
@@ -45,6 +45,18 @@ vgr_coef_c: 0.042
 When `convert_steer_cmd_method: "vgr"` is selected, the node receives the control command from the controller as the desired tire angle and calculates the desired steering angle to output.
 Also, when `convert_actuation_to_steering_status: true`, this node receives the `actuation_status` topic and calculates the steer tire angle from the `steer_wheel_angle` and publishes it.
 
+### Vehicle Adaptor
+
+**Under development**
+A feature that compensates for control commands according to the dynamic characteristics of the vehicle.
+This feature works when `use_vehicle_adaptor: true` is set and requires `control_horizon` to be enabled, so you need to set `enable_control_cmd_horizon_pub: true` in the trajectory_follower node.
+
+### Latency Measurement
+
+This node includes a latency measurement feature that tracks the time difference between receiving a control command and publishing the corresponding actuation command. The measured latency is published as a debug topic, which can be useful for performance monitoring and system optimization.
+
+The latency is calculated as the time difference between the timestamp of the incoming control command and the current time when the actuation command is published. When the input `control_cmd` contains a timestamp that represents the time when the control module started processing (propagated through the control pipeline), the `control_component_latency` represents the overall processing time of the entire control module system.
+
 ## Input topics
 
 | Name                       | Type                                       | Description                                                                                                                                                                                                                                                                                       |
@@ -54,12 +66,21 @@ Also, when `convert_actuation_to_steering_status: true`, this node receives the 
 | `~/input/odometry`         | navigation_msgs::Odometry                  | twist topic in odometry is used.                                                                                                                                                                                                                                                                  |
 | `~/input/actuation_status` | tier4_vehicle_msgs::msg::ActuationStatus   | actuation status is assumed to receive the same type of status as sent to the vehicle side. For example, if throttle/brake pedal/steer_wheel_angle is sent, the same type of status is received. In the case of steer_wheel_angle, it is used to calculate steer_tire_angle and VGR in this node. |
 
+Input topics when vehicle_adaptor is enabled
+
+| Name                           | Type                                            | Description             |
+| ------------------------------ | ----------------------------------------------- | ----------------------- |
+| `~/input/accel`                | geometry_msgs::msg::AccelWithCovarianceStamped; | acceleration status     |
+| `~/input/operation_mode_state` | autoware_adapi_v1_msgs::msg::OperationModeState | operation mode status   |
+| `~/input/control_horizon`      | autoware_control_msgs::msg::ControlHorizon      | control horizon command |
+
 ## Output topics
 
-| Name                       | Type                                             | Description                                                                                                                          |
-| -------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `~/output/actuation_cmd`   | tier4_vehicle_msgs::msg::ActuationCommandStamped | actuation command for vehicle to apply mechanical input                                                                              |
-| `~/output/steering_status` | autoware_vehicle_msgs::msg::SteeringReport       | publish only when `convert_actuation_to_steering_status: true`. steer tire angle is calculated from steer wheel angle and published. |
+| Name                                 | Type                                              | Description                                                                                                                          |
+| ------------------------------------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `~/output/actuation_cmd`             | tier4_vehicle_msgs::msg::ActuationCommandStamped  | actuation command for vehicle to apply mechanical input                                                                              |
+| `~/output/steering_status`           | autoware_vehicle_msgs::msg::SteeringReport        | publish only when `convert_actuation_to_steering_status: true`. steer tire angle is calculated from steer wheel angle and published. |
+| `~/output/control_component_latency` | autoware_internal_debug_msgs::msg::Float64Stamped | control system latency measurement from control command reception to actuation command publication                                   |
 
 ## Parameters
 

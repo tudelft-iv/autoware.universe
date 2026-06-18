@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <type_traits>
 #define EIGEN_MPL2_ONLY
 
 #include "autoware/object_merger/object_association_merger_node.hpp"
-
 #include "autoware/object_recognition_utils/object_recognition_utils.hpp"
-#include "autoware/universe_utils/geometry/geometry.hpp"
+#include "autoware_utils/geometry/geometry.hpp"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -32,10 +32,22 @@
 #include <utility>
 #include <vector>
 
-using Label = autoware_perception_msgs::msg::ObjectClassification;
+using autoware_perception_msgs::msg::DetectedObject;
 
 namespace
 {
+int get_class_based_priority_mode(
+  const DetectedObject & object0, const DetectedObject & object1,
+  const std::vector<int64_t> & class_based_priority_matrix, const int NUMBER_OF_CLASSES)
+{
+  const std::uint8_t highest_label0 =
+    autoware::object_recognition_utils::getHighestProbLabel(object0.classification);
+  const std::uint8_t highest_label1 =
+    autoware::object_recognition_utils::getHighestProbLabel(object1.classification);
+  const int index = highest_label1 * NUMBER_OF_CLASSES + highest_label0;
+  return static_cast<int>(class_based_priority_matrix[index]);
+}
+
 bool isUnknownObjectOverlapped(
   const autoware_perception_msgs::msg::DetectedObject & unknown_object,
   const autoware_perception_msgs::msg::DetectedObject & known_object,
@@ -48,7 +60,7 @@ bool isUnknownObjectOverlapped(
   const double distance_threshold = distance_threshold_map.at(
     autoware::object_recognition_utils::getHighestProbLabel(known_object.classification));
   const double sq_distance_threshold = std::pow(distance_threshold, 2.0);
-  const double sq_distance = autoware::universe_utils::calcSquaredDistance2d(
+  const double sq_distance = autoware_utils::calc_squared_distance2d(
     unknown_object.kinematics.pose_with_covariance.pose,
     known_object.kinematics.pose_with_covariance.pose);
   if (sq_distance_threshold < sq_distance) return false;
@@ -88,6 +100,7 @@ ObjectAssociationMergerNode::ObjectAssociationMergerNode(const rclcpp::NodeOptio
   // Parameters
   base_link_frame_id_ = declare_parameter<std::string>("base_link_frame_id");
   priority_mode_ = static_cast<PriorityMode>(declare_parameter<int>("priority_mode"));
+
   sync_queue_size_ = declare_parameter<int>("sync_queue_size");
   remove_overlapped_unknown_objects_ = declare_parameter<bool>("remove_overlapped_unknown_objects");
   overlapped_judge_param_.precision_threshold =
@@ -102,6 +115,11 @@ ObjectAssociationMergerNode::ObjectAssociationMergerNode(const rclcpp::NodeOptio
    *  this implementation assumes index of vector shows class_label.
    *  if param supports map, refactor this code.
    */
+
+  class_based_priority_matrix_ =
+    this->declare_parameter<std::vector<int64_t>>("class_based_priority_matrix");
+  NUMBER_OF_CLASSES_ = static_cast<int>(std::sqrt(class_based_priority_matrix_.size()));
+
   overlapped_judge_param_.distance_threshold_map =
     convertListToClassMap(declare_parameter<std::vector<double>>("distance_threshold_list"));
 
@@ -125,13 +143,21 @@ ObjectAssociationMergerNode::ObjectAssociationMergerNode(const rclcpp::NodeOptio
 
   // Debug publisher
   processing_time_publisher_ =
-    std::make_unique<autoware::universe_utils::DebugPublisher>(this, "object_association_merger");
-  stop_watch_ptr_ =
-    std::make_unique<autoware::universe_utils::StopWatch<std::chrono::milliseconds>>();
+    std::make_unique<autoware_utils::DebugPublisher>(this, "object_association_merger");
+  stop_watch_ptr_ = std::make_unique<autoware_utils::StopWatch<std::chrono::milliseconds>>();
   stop_watch_ptr_->tic("cyclic_time");
   stop_watch_ptr_->tic("processing_time");
-  published_time_publisher_ =
-    std::make_unique<autoware::universe_utils::PublishedTimePublisher>(this);
+  published_time_publisher_ = std::make_unique<autoware_utils::PublishedTimePublisher>(this);
+  // Timeout process initialization
+  message_timeout_sec_ = this->declare_parameter<double>("message_timeout_sec");
+  initialization_timeout_sec_ = this->declare_parameter<double>("initialization_timeout_sec");
+  last_sync_time_ = std::nullopt;
+  message_interval_ = std::nullopt;
+  timeout_timer_ = rclcpp::create_timer(
+    this, get_clock(), std::chrono::duration<double>(message_timeout_sec_ / 2),
+    std::bind(&ObjectAssociationMergerNode::diagCallback, this));
+  diagnostics_interface_ptr_ =
+    std::make_unique<autoware_utils::DiagnosticsInterface>(this, "object_association_merger");
 }
 
 void ObjectAssociationMergerNode::objectsCallback(
@@ -184,6 +210,27 @@ void ObjectAssociationMergerNode::objectsCallback(
           else
             output_msg.objects.push_back(object1);
           break;
+        case PriorityMode::ClassBased: {
+          PriorityMode class_based_priority_mode =
+            static_cast<PriorityMode>(get_class_based_priority_mode(
+              object0, object1, class_based_priority_matrix_, NUMBER_OF_CLASSES_));
+          switch (class_based_priority_mode) {
+            case PriorityMode::Object0:
+              output_msg.objects.push_back(object0);
+              break;
+            case PriorityMode::Object1:
+              output_msg.objects.push_back(object1);
+              break;
+            case PriorityMode::Confidence:
+              if (object1.existence_probability <= object0.existence_probability)
+                output_msg.objects.push_back(object0);
+              else
+                output_msg.objects.push_back(object1);
+              break;
+            case PriorityMode::ClassBased:
+              break;  // This case should not happen
+          }
+        }
       }
     } else {  // not found
       output_msg.objects.push_back(object0);
@@ -231,15 +278,72 @@ void ObjectAssociationMergerNode::objectsCallback(
     }
   }
 
+  // Diagnostics part
+  rclcpp::Time now = this->now();
+  // Calculate the interval since the last sync,
+  // or set to 0.0 if this is the first sync
+  if (message_interval_.has_value()) {
+    message_interval_ = (now - last_sync_time_.value()).seconds();
+  } else {
+    // initialize message interval
+    message_interval_ = 0.0;
+  }
+  // Update the last sync time to now
+  last_sync_time_ = now;
+
   // publish output msg
   merged_object_pub_->publish(output_msg);
   published_time_publisher_->publish_if_subscribed(merged_object_pub_, output_msg.header.stamp);
   // publish processing time
-  processing_time_publisher_->publish<tier4_debug_msgs::msg::Float64Stamped>(
+  processing_time_publisher_->publish<autoware_internal_debug_msgs::msg::Float64Stamped>(
     "debug/cyclic_time_ms", stop_watch_ptr_->toc("cyclic_time", true));
-  processing_time_publisher_->publish<tier4_debug_msgs::msg::Float64Stamped>(
+  processing_time_publisher_->publish<autoware_internal_debug_msgs::msg::Float64Stamped>(
     "debug/processing_time_ms", stop_watch_ptr_->toc("processing_time", true));
 }
+
+void ObjectAssociationMergerNode::diagCallback()
+{
+  rclcpp::Time now = this->now();
+  // If the time source is not initialized, return early
+  if (now.nanoseconds() == 0) {
+    return;
+  }
+  // Initialize the time source if it hasn't been initialized yet
+  if (!last_sync_time_.has_value()) {
+    last_sync_time_ = now;
+    return;
+  }
+
+  const double time_since_last_sync = (now - last_sync_time_.value()).seconds();
+  const double message_interval_value = message_interval_.value_or(0.0);
+  const double timeout = message_interval_ ? message_timeout_sec_ : initialization_timeout_sec_;
+  const bool interval_exceeded = message_interval_value >= message_timeout_sec_;
+  const bool elapsed_exceeded = time_since_last_sync >= timeout;
+  const bool timeout_occurred = elapsed_exceeded || interval_exceeded;
+  diagnostics_interface_ptr_->clear();
+  diagnostics_interface_ptr_->add_key_value("timeout_occurred", timeout_occurred);
+  diagnostics_interface_ptr_->add_key_value("elapsed_time_since_sync", time_since_last_sync);
+  diagnostics_interface_ptr_->add_key_value("messages_interval", message_interval_value);
+  std::string message;
+  if (elapsed_exceeded) {
+    const std::string prefix = message_interval_
+                                 ? "No recent messages received or synchronized"
+                                 : "No synchronized messages received since startup";
+    message = "[WARN] " + prefix + " - Elapsed time " + std::to_string(time_since_last_sync) +
+              "s exceeded timeout threshold of " + std::to_string(timeout) + "s.";
+  } else if (interval_exceeded) {
+    message = "[WARN] Message interval " + std::to_string(message_interval_value) +
+              "s exceeded allowed interval of " + std::to_string(message_timeout_sec_) + "s.";
+  } else {
+    message = "[OK] Status is normal.";
+  }
+  diagnostics_interface_ptr_->update_level_and_message(
+    timeout_occurred ? diagnostic_msgs::msg::DiagnosticStatus::WARN
+                     : diagnostic_msgs::msg::DiagnosticStatus::OK,
+    message);
+  diagnostics_interface_ptr_->publish(now);
+}
+
 }  // namespace autoware::object_merger
 
 #include <rclcpp_components/register_node_macro.hpp>

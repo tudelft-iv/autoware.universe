@@ -1,4 +1,4 @@
-// Copyright 2022 TIER IV, Inc.
+// Copyright 2022-2025 TIER IV, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,14 +15,14 @@
 #ifndef AUTOWARE_CROSSWALK_TRAFFIC_LIGHT_ESTIMATOR__NODE_HPP_
 #define AUTOWARE_CROSSWALK_TRAFFIC_LIGHT_ESTIMATOR__NODE_HPP_
 
-#include <autoware/universe_utils/ros/debug_publisher.hpp>
-#include <autoware/universe_utils/system/stop_watch.hpp>
+#include <autoware_utils/ros/debug_publisher.hpp>
+#include <autoware_utils/system/stop_watch.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+#include <autoware_internal_debug_msgs/msg/float64_stamped.hpp>
 #include <autoware_map_msgs/msg/lanelet_map_bin.hpp>
 #include <autoware_perception_msgs/msg/traffic_light_group_array.hpp>
 #include <autoware_planning_msgs/msg/lanelet_route.hpp>
-#include <tier4_debug_msgs/msg/float64_stamped.hpp>
 
 #include <lanelet2_core/Attribute.h>
 #include <lanelet2_core/LaneletMap.h>
@@ -39,11 +39,11 @@
 namespace autoware::crosswalk_traffic_light_estimator
 {
 
-using autoware::universe_utils::DebugPublisher;
-using autoware::universe_utils::StopWatch;
+using autoware_internal_debug_msgs::msg::Float64Stamped;
 using autoware_map_msgs::msg::LaneletMapBin;
 using autoware_planning_msgs::msg::LaneletRoute;
-using tier4_debug_msgs::msg::Float64Stamped;
+using autoware_utils::DebugPublisher;
+using autoware_utils::StopWatch;
 using TrafficSignal = autoware_perception_msgs::msg::TrafficLightGroup;
 using TrafficSignalArray = autoware_perception_msgs::msg::TrafficLightGroupArray;
 using TrafficSignalElement = autoware_perception_msgs::msg::TrafficLightElement;
@@ -77,10 +77,18 @@ private:
   void updateLastDetectedSignal(const TrafficLightIdMap & traffic_signals);
   void updateLastDetectedSignals(const TrafficLightIdMap & traffic_signals);
   void updateFlashingState(const TrafficSignal & signal);
+
   uint8_t updateAndGetColorState(const TrafficSignal & signal);
+  /// @brief update the overrides of crosswalk signals from the lanelet map for the given traffic
+  /// light id
+  void update_crosswalk_overrides_from_map(
+    std::unordered_map<lanelet::Id, uint8_t> & crosswalk_traffic_signal_overrides,
+    const lanelet::Id traffic_light_group_id, const TrafficLightIdMap & traffic_light_id_map);
+
   void setCrosswalkTrafficSignal(
     const lanelet::ConstLanelet & crosswalk, const uint8_t color, const TrafficSignalArray & msg,
-    TrafficSignalArray & output);
+    TrafficSignalArray & output,
+    const std::unordered_map<lanelet::Id, uint8_t> & crosswalk_traffic_signal_overrides);
 
   lanelet::ConstLanelets getNonRedLanelets(
     const lanelet::ConstLanelets & lanelets, const TrafficLightIdMap & traffic_light_id_map) const;
@@ -97,8 +105,11 @@ private:
 
   void removeDuplicateIds(TrafficSignalArray & signal_array) const;
 
+  bool isInvalidDetectionStatus(const TrafficSignal & signal) const;
+
   // Node param
   bool use_last_detect_color_;
+  bool use_pedestrian_signal_detect_;
   double last_detect_color_hold_time_;
   double last_colors_hold_time_;
 

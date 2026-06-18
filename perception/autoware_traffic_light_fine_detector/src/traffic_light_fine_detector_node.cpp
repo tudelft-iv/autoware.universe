@@ -30,66 +30,44 @@ namespace fs = ::std::experimental::filesystem;
 #include <utility>
 #include <vector>
 
-namespace
-{
-float calWeightedIou(
-  const sensor_msgs::msg::RegionOfInterest & bbox1, const autoware::tensorrt_yolox::Object & bbox2)
-{
-  int x1 = std::max(static_cast<int>(bbox1.x_offset), bbox2.x_offset);
-  int x2 = std::min(static_cast<int>(bbox1.x_offset + bbox1.width), bbox2.x_offset + bbox2.width);
-  int y1 = std::max(static_cast<int>(bbox1.y_offset), bbox2.y_offset);
-  int y2 = std::min(static_cast<int>(bbox1.y_offset + bbox1.height), bbox2.y_offset + bbox2.height);
-  int area1 = std::max(x2 - x1, 0) * std::max(y2 - y1, 0);
-  int area2 = bbox1.width * bbox1.height + bbox2.width * bbox2.height - area1;
-  if (area2 == 0) {
-    return 0.0;
-  }
-  return bbox2.score * area1 / area2;
-}
-
-}  // namespace
-
 namespace autoware::traffic_light
 {
 TrafficLightFineDetectorNode::TrafficLightFineDetectorNode(const rclcpp::NodeOptions & options)
 : Node("traffic_light_fine_detector_node", options)
 {
-  int num_class = 2;
   using std::placeholders::_1;
   using std::placeholders::_2;
   using std::placeholders::_3;
 
-  std::string model_path = declare_parameter("fine_detector_model_path", "");
-  std::string label_path = declare_parameter("fine_detector_label_path", "");
-  std::string precision = declare_parameter("fine_detector_precision", "fp32");
-  const uint8_t gpu_id = declare_parameter("gpu_id", 0);
+  std::string model_path = this->declare_parameter<std::string>("model_path");
+  std::string label_path = this->declare_parameter<std::string>("label_path");
+  std::string precision = this->declare_parameter<std::string>("precision");
+  const uint8_t gpu_id = this->declare_parameter<uint8_t>("gpu_id");
   // Objects with a score lower than this value will be ignored.
   // This threshold will be ignored if specified model contains EfficientNMS_TRT module in it
-  score_thresh_ = declare_parameter("fine_detector_score_thresh", 0.3);
+  score_thresh_ = this->declare_parameter<double>("score_thresh");
   // Detection results will be ignored if IoU over this value.
   // This threshold will be ignored if specified model contains EfficientNMS_TRT module in it
-  float nms_threshold = declare_parameter("fine_detector_nms_thresh", 0.65);
-  is_approximate_sync_ = this->declare_parameter<bool>("approximate_sync", false);
+  float nms_threshold = static_cast<float>(this->declare_parameter<double>("nms_thresh"));
+  is_approximate_sync_ = this->declare_parameter<bool>("approximate_sync");
 
+  int num_class;
   if (!readLabelFile(label_path, tlr_label_id_, num_class)) {
     RCLCPP_ERROR(this->get_logger(), "Could not find tlr id");
   }
-
-  const autoware::tensorrt_common::BuildConfig build_config =
-    autoware::tensorrt_common::BuildConfig("MinMax", -1, false, false, false, 0.0);
 
   const bool cuda_preprocess = true;
   const std::string calib_image_list = "";
   const double scale = 1.0;
   const std::string cache_dir = "";
-  nvinfer1::Dims input_dim = autoware::tensorrt_common::get_input_dims(model_path);
-  assert(input_dim.d[0] > 0);
-  batch_size_ = input_dim.d[0];
-  const autoware::tensorrt_common::BatchConfig batch_config{batch_size_, batch_size_, batch_size_};
+
+  auto trt_config = autoware::tensorrt_common::TrtCommonConfig(model_path, precision);
 
   trt_yolox_ = std::make_unique<autoware::tensorrt_yolox::TrtYoloX>(
-    model_path, precision, num_class, score_thresh_, nms_threshold, build_config, cuda_preprocess,
-    gpu_id, calib_image_list, scale, cache_dir, batch_config);
+    trt_config, num_class, score_thresh_, nms_threshold, cuda_preprocess, gpu_id, calib_image_list,
+    scale, cache_dir);
+
+  batch_size_ = trt_yolox_->getBatchSize();
 
   if (!trt_yolox_->isGPUInitialized()) {
     RCLCPP_ERROR(this->get_logger(), "GPU %d does not exist or is not suitable.", gpu_id);
@@ -104,8 +82,8 @@ TrafficLightFineDetectorNode::TrafficLightFineDetectorNode(const rclcpp::NodeOpt
 
   std::lock_guard<std::mutex> lock(connect_mutex_);
   output_roi_pub_ = this->create_publisher<TrafficLightRoiArray>("~/output/rois", 1);
-  exe_time_pub_ =
-    this->create_publisher<tier4_debug_msgs::msg::Float32Stamped>("~/debug/exe_time_ms", 1);
+  exe_time_pub_ = this->create_publisher<autoware_internal_debug_msgs::msg::Float32Stamped>(
+    "~/debug/exe_time_ms", 1);
   if (is_approximate_sync_) {
     approximate_sync_.reset(
       new ApproximateSync(ApproximateSyncPolicy(10), image_sub_, rough_roi_sub_, expect_roi_sub_));
@@ -116,7 +94,7 @@ TrafficLightFineDetectorNode::TrafficLightFineDetectorNode(const rclcpp::NodeOpt
     sync_->registerCallback(std::bind(&TrafficLightFineDetectorNode::callback, this, _1, _2, _3));
   }
 
-  if (declare_parameter("build_only", false)) {
+  if (this->declare_parameter<bool>("build_only")) {
     RCLCPP_INFO(get_logger(), "TensorRT engine is built and shutdown node.");
     rclcpp::shutdown();
   }
@@ -167,7 +145,7 @@ void TrafficLightFineDetectorNode::callback(
     cv::Point lt(rough_roi.roi.x_offset, rough_roi.roi.y_offset);
     cv::Point rb(
       rough_roi.roi.x_offset + rough_roi.roi.width, rough_roi.roi.y_offset + rough_roi.roi.height);
-    fitInFrame(lt, rb, cv::Size(original_image.size()));
+    utils::fitInFrame(lt, rb, cv::Size(original_image.size()));
     rois.emplace_back(lt, rb);
     lts.emplace_back(lt);
     roi_ids.emplace_back(rough_roi.traffic_light_id);
@@ -189,7 +167,7 @@ void TrafficLightFineDetectorNode::callback(
           cv::Point lt_roi(
             lts[batch_i].x + detection.x_offset, lts[batch_i].y + detection.y_offset);
           cv::Point rb_roi(lt_roi.x + detection.width, lt_roi.y + detection.height);
-          fitInFrame(lt_roi, rb_roi, cv::Size(original_image.size()));
+          utils::fitInFrame(lt_roi, rb_roi, cv::Size(original_image.size()));
           autoware::tensorrt_yolox::Object det = detection;
           det.x_offset = lt_roi.x;
           det.y_offset = lt_roi.y;
@@ -211,7 +189,7 @@ void TrafficLightFineDetectorNode::callback(
   const auto exe_end_time = high_resolution_clock::now();
   const double exe_time =
     std::chrono::duration_cast<milliseconds>(exe_end_time - exe_start_time).count();
-  tier4_debug_msgs::msg::Float32Stamped exe_time_msg;
+  autoware_internal_debug_msgs::msg::Float32Stamped exe_time_msg;
   exe_time_msg.data = exe_time;
   exe_time_msg.stamp = this->now();
   exe_time_pub_->publish(exe_time_msg);
@@ -229,7 +207,7 @@ float TrafficLightFineDetectorNode::evalMatchScore(
     float max_score = 0.0f;
     const sensor_msgs::msg::RegionOfInterest & expected_roi = roi_p.second.roi;
     for (const autoware::tensorrt_yolox::Object & detection : id2detections[tlr_id]) {
-      float score = ::calWeightedIou(expected_roi, detection);
+      float score = utils::calWeightedIou(expected_roi, detection);
       if (score >= max_score) {
         max_score = score;
         id2bestDetection[tlr_id] = detection;
@@ -313,26 +291,6 @@ bool TrafficLightFineDetectorNode::rosMsg2CvMat(
     RCLCPP_ERROR(
       this->get_logger(), "Failed to convert sensor_msgs::msg::Image to cv::Mat \n%s", e.what());
     return false;
-  }
-
-  return true;
-}
-
-bool TrafficLightFineDetectorNode::fitInFrame(cv::Point & lt, cv::Point & rb, const cv::Size & size)
-{
-  const int width = static_cast<int>(size.width);
-  const int height = static_cast<int>(size.height);
-  {
-    const int x_min = 0, x_max = width - 2;
-    const int y_min = 0, y_max = height - 2;
-    lt.x = std::min(std::max(lt.x, x_min), x_max);
-    lt.y = std::min(std::max(lt.y, y_min), y_max);
-  }
-  {
-    const int x_min = lt.x + 1, x_max = width - 1;
-    const int y_min = lt.y + 1, y_max = height - 1;
-    rb.x = std::min(std::max(rb.x, x_min), x_max);
-    rb.y = std::min(std::max(rb.y, y_min), y_max);
   }
 
   return true;

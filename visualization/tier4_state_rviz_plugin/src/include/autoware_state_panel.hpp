@@ -49,18 +49,20 @@
 #include <autoware_adapi_v1_msgs/srv/change_operation_mode.hpp>
 #include <autoware_adapi_v1_msgs/srv/clear_route.hpp>
 #include <autoware_adapi_v1_msgs/srv/initialize_localization.hpp>
+#include <autoware_adapi_v1_msgs/srv/list_mrm_description.hpp>
+#include <autoware_internal_planning_msgs/msg/velocity_limit.hpp>
 #include <autoware_vehicle_msgs/msg/gear_report.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
 #include <tier4_external_api_msgs/msg/emergency.hpp>
 #include <tier4_external_api_msgs/srv/set_emergency.hpp>
-#include <tier4_planning_msgs/msg/velocity_limit.hpp>
 
 #include <qlabel.h>
 
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace rviz_plugins
 {
@@ -76,6 +78,7 @@ class AutowareStatePanel : public rviz_common::Panel
   using MotionState = autoware_adapi_v1_msgs::msg::MotionState;
   using AcceptStart = autoware_adapi_v1_msgs::srv::AcceptStart;
   using MRMState = autoware_adapi_v1_msgs::msg::MrmState;
+  using ListMrmDescription = autoware_adapi_v1_msgs::srv::ListMrmDescription;
   using DiagnosticArray = diagnostic_msgs::msg::DiagnosticArray;
   using DiagnosticStatus = diagnostic_msgs::msg::DiagnosticStatus;
 
@@ -119,7 +122,8 @@ protected:
   rclcpp::Client<tier4_external_api_msgs::srv::SetEmergency>::SharedPtr client_emergency_stop_;
   rclcpp::Subscription<tier4_external_api_msgs::msg::Emergency>::SharedPtr sub_emergency_;
 
-  rclcpp::Publisher<tier4_planning_msgs::msg::VelocityLimit>::SharedPtr pub_velocity_limit_;
+  rclcpp::Publisher<autoware_internal_planning_msgs::msg::VelocityLimit>::SharedPtr
+    pub_velocity_limit_;
 
   QLabel * velocity_limit_value_label_{nullptr};
   bool sliderIsDragging = false;
@@ -185,8 +189,11 @@ protected:
   QLabel * mrm_state_label_ptr_{nullptr};
   CustomIconLabel * mrm_behavior_icon{nullptr};
   QLabel * mrm_behavior_label_ptr_{nullptr};
+  std::unordered_map<uint16_t, std::pair<std::string, std::string>> mrm_behaviors_;
 
   rclcpp::Subscription<MRMState>::SharedPtr sub_mrm_;
+  rclcpp::Client<ListMrmDescription>::SharedPtr client_list_mrm_;
+  rclcpp::TimerBase::SharedPtr timer_list_mrm_;
 
   void onMRMState(const MRMState::ConstSharedPtr msg);
 

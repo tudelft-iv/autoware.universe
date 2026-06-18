@@ -27,6 +27,8 @@
 #include <rclcpp/time.hpp>
 
 #include <autoware_adapi_v1_msgs/msg/operation_mode_state.hpp>
+#include <autoware_internal_planning_msgs/msg/detail/velocity_limit__struct.hpp>
+#include <autoware_internal_planning_msgs/msg/path_with_lane_id.hpp>
 #include <autoware_perception_msgs/msg/predicted_objects.hpp>
 #include <autoware_perception_msgs/msg/traffic_light_group_array.hpp>
 #include <autoware_planning_msgs/msg/pose_with_uuid_stamped.hpp>
@@ -37,9 +39,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <tier4_planning_msgs/msg/detail/velocity_limit__struct.hpp>
 #include <tier4_planning_msgs/msg/lateral_offset.hpp>
-#include <tier4_planning_msgs/msg/path_with_lane_id.hpp>
 
 #include <limits>
 #include <map>
@@ -52,6 +52,7 @@ namespace autoware::behavior_path_planner
 {
 using autoware::route_handler::RouteHandler;
 using autoware_adapi_v1_msgs::msg::OperationModeState;
+using autoware_internal_planning_msgs::msg::PathWithLaneId;
 using autoware_perception_msgs::msg::PredictedObject;
 using autoware_perception_msgs::msg::PredictedObjects;
 using autoware_perception_msgs::msg::TrafficLightGroup;
@@ -63,10 +64,9 @@ using geometry_msgs::msg::PoseStamped;
 using nav_msgs::msg::OccupancyGrid;
 using nav_msgs::msg::Odometry;
 using tier4_planning_msgs::msg::LateralOffset;
-using tier4_planning_msgs::msg::PathWithLaneId;
 using PlanResult = PathWithLaneId::SharedPtr;
+using autoware_internal_planning_msgs::msg::VelocityLimit;
 using lanelet::TrafficLight;
-using tier4_planning_msgs::msg::VelocityLimit;
 using unique_identifier_msgs::msg::UUID;
 
 struct TrafficSignalStamped
@@ -102,7 +102,7 @@ struct DrivableAreaInfo
   struct Obstacle
   {
     geometry_msgs::msg::Pose pose;
-    autoware::universe_utils::Polygon2d poly;
+    autoware_utils::Polygon2d poly;
     bool is_left{true};
   };
   std::vector<DrivableLanes> drivable_lanes{};
@@ -240,7 +240,23 @@ struct PlannerData
       node.declare_parameter<double>("turn_signal_shift_length_threshold");
     parameters.turn_signal_remaining_shift_length_threshold =
       node.declare_parameter<double>("turn_signal_remaining_shift_length_threshold");
+    parameters.turn_signal_remaining_distance_to_bound_threshold =
+      node.declare_parameter<double>("turn_signal_remaining_distance_to_bound_threshold");
     parameters.turn_signal_on_swerving = node.declare_parameter<bool>("turn_signal_on_swerving");
+    parameters.turn_signal_roundabout_on_entry =
+      node.declare_parameter<std::string>("turn_signal_roundabout_on_entry");
+    parameters.turn_signal_roundabout_on_exit =
+      node.declare_parameter<std::string>("turn_signal_roundabout_on_exit");
+    parameters.turn_signal_roundabout_entry_indicator_persistence =
+      node.declare_parameter<bool>("turn_signal_roundabout_entry_indicator_persistence");
+    parameters.turn_signal_roundabout_search_distance =
+      node.declare_parameter<double>("turn_signal_roundabout_search_distance");
+    parameters.turn_signal_roundabout_angle_threshold_deg =
+      node.declare_parameter<double>("turn_signal_roundabout_angle_threshold_deg");
+    parameters.turn_signal_roundabout_backward_depth =
+      node.declare_parameter<int>("turn_signal_roundabout_backward_depth");
+    parameters.turn_signal_path_backward_length =
+      node.declare_parameter<double>("turn_signal_path_backward_length");
 
     parameters.enable_akima_spline_first =
       node.declare_parameter<bool>("enable_akima_spline_first");
@@ -296,8 +312,8 @@ struct PlannerData
 
     return turn_signal_decider.getBehaviorTurnSignalInfo(
       shifted_path, shift_line, current_lanelets, route_handler, parameters, self_odometry,
-      current_shift_length, is_driving_forward, egos_lane_is_shifted, override_ego_stopped_check,
-      is_pull_out, is_lane_change, is_pull_over);
+      parameters.vehicle_info, current_shift_length, is_driving_forward, egos_lane_is_shifted,
+      override_ego_stopped_check, is_pull_out, is_lane_change, is_pull_over);
   }
 
   std::pair<TurnSignalInfo, bool> getBehaviorTurnSignalInfo(
@@ -308,8 +324,8 @@ struct PlannerData
   {
     return turn_signal_decider.getBehaviorTurnSignalInfo(
       path, shift_line, current_lanelets, route_handler, parameters, self_odometry,
-      current_shift_length, is_driving_forward, egos_lane_is_shifted, override_ego_stopped_check,
-      is_pull_out);
+      parameters.vehicle_info, current_shift_length, is_driving_forward, egos_lane_is_shifted,
+      override_ego_stopped_check, is_pull_out);
   }
 
   TurnIndicatorsCommand getTurnSignal(
