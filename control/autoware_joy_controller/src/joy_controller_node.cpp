@@ -15,6 +15,7 @@
 #include "autoware/joy_controller/joy_controller.hpp"
 #include "autoware/joy_controller/joy_converter/ds4_joy_converter.hpp"
 #include "autoware/joy_controller/joy_converter/g29_joy_converter.hpp"
+#include "autoware/joy_controller/joy_converter/g920_joy_converter.hpp"
 #include "autoware/joy_controller/joy_converter/p65_joy_converter.hpp"
 #include "autoware/joy_controller/joy_converter/xbox_joy_converter.hpp"
 
@@ -159,6 +160,8 @@ void AutowareJoyControllerNode::onJoy()
     joy_ = std::make_shared<const G29JoyConverter>(*msg);
   } else if (joy_type_ == "DS4") {
     joy_ = std::make_shared<const DS4JoyConverter>(*msg);
+  } else if (joy_type_ == "G920") {
+    joy_ = std::make_shared<const G920JoyConverter>(*msg);
   } else if (joy_type_ == "XBOX") {
     joy_ = std::make_shared<const XBOXJoyConverter>(*msg);
   } else {
@@ -277,7 +280,13 @@ void AutowareJoyControllerNode::publishControlCommand()
     cmd.lateral.steering_tire_rotation_rate = steering_angle_velocity_;
 
     if (joy_->accel()) {
-      cmd.longitudinal.acceleration = accel_ratio_ * joy_->accel();
+      double accel_ratio_limited = accel_ratio_;
+      if (twist_->twist.linear.x > max_forward_velocity_)
+      {
+        accel_ratio_limited = 0;
+      }
+
+      cmd.longitudinal.acceleration = accel_ratio_limited * joy_->accel();
       cmd.longitudinal.velocity =
         twist_->twist.linear.x + velocity_gain_ * cmd.longitudinal.acceleration;
       cmd.longitudinal.velocity =
@@ -312,8 +321,14 @@ void AutowareJoyControllerNode::publishExternalControlCommand()
 
     cmd.steering_angle = steer_ratio_ * joy_->steer();
     cmd.steering_angle_velocity = steering_angle_velocity_;
+    double accel_ratio_limited = accel_ratio_;
+    // Check if velocity is over the limit
+    if (twist_->twist.linear.x > max_forward_velocity_)
+    {
+      accel_ratio_limited = 0;
+    }
     cmd.throttle =
-      accel_ratio_ * calcMapping(static_cast<double>(joy_->accel()), accel_sensitivity_);
+    accel_ratio_limited * calcMapping(static_cast<double>(joy_->accel()), accel_sensitivity_);
     cmd.brake = brake_ratio_ * calcMapping(static_cast<double>(joy_->brake()), brake_sensitivity_);
   }
 

@@ -149,7 +149,15 @@ void Tracker::updateClassification(
   // Parameters
   // if the remove_threshold is too high (compare to the gain), the classification will be removed
   // immediately
-  const float gain = 0.05;
+
+  // TODO: Be Aware! This variable gain is added in order to tune the tracker completely to making the
+  // post-RSS demo work with the cyclist until we have a better detector. It basically means that
+  // we make the tracker sticky to believing something is a cyclist.
+  float gain = 5;
+    unsigned int highest_probable_label = unsigned(getHighestProbLabel());
+  if (highest_probable_label == unsigned(autoware_perception_msgs::msg::ObjectClassification::BICYCLE)) {
+    gain = .005;
+  }
   constexpr float remove_threshold = 0.001;
 
   // Normalization function

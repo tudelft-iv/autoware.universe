@@ -7,7 +7,7 @@
   <arg name="use_eagleye_twist" default="true"/>
 
   <arg name="enable_additional_rolling" default="false"/>
-  <arg name="use_multi_antenna_mode" default="false"/>
+  <arg name="use_multi_antenna_mode" default="true"/>
 
   <group>
     <push-ros-namespace namespace="eagleye"/>
@@ -49,16 +49,19 @@
       <param from="$(var eagleye_param_path)"/>
       <param name="yaml_file" value="$(var eagleye_param_path)"/>
       <param name="use_multi_antenna_mode" value="$(var use_multi_antenna_mode)"/>
+      <remap from="gnss_compass_pose" to="/sensing/gnss/pose"/>
     </node>
     <node pkg="eagleye_rt" name="heading_node_2nd" exec="heading" args="2nd" if="$(eval &quot;'$(var use_rtk_heading)'=='false'&quot;)">
       <param from="$(var eagleye_param_path)"/>
       <param name="yaml_file" value="$(var eagleye_param_path)"/>
       <param name="use_multi_antenna_mode" value="$(var use_multi_antenna_mode)"/>
+      <remap from="gnss_compass_pose" to="/sensing/gnss/pose"/>
     </node>
     <node pkg="eagleye_rt" name="heading_node_3rd" exec="heading" args="3rd" if="$(eval &quot;'$(var use_rtk_heading)'=='false'&quot;)">
       <param from="$(var eagleye_param_path)"/>
       <param name="yaml_file" value="$(var eagleye_param_path)"/>
       <param name="use_multi_antenna_mode" value="$(var use_multi_antenna_mode)"/>
+      <remap from="gnss_compass_pose" to="/sensing/gnss/pose"/>
     </node>
     <node pkg="eagleye_rt" name="heading_interpolate_node_1st" exec="heading_interpolate" args="1st">
       <param from="$(var eagleye_param_path)"/>

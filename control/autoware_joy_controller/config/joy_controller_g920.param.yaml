@@ -1,0 +1,16 @@
+/**:
+  ros__parameters:
+    joy_type: G920
+    update_rate: 40.0
+    accel_ratio: 0.25
+    brake_ratio: 5.0
+    steer_ratio: 0.5
+    steering_angle_velocity: 0.1
+    accel_sensitivity: 0.25
+    brake_sensitivity: 0.5
+    control_command:
+      raw_control: false
+      velocity_gain: 3.0
+      max_forward_velocity: 2.0
+      max_backward_velocity: 3.0
+      backward_accel_ratio: 1.0

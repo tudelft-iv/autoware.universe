@@ -203,6 +203,9 @@ bool UnknownTracker::measure(
   const types::DynamicObject updating_object = getUpdatingObject(object, self_transform);
   measureWithPose(updating_object);
 
+  // It's still the dynamics of unknown tracker, but does show update labels in e.g. rviz
+  updateClassification(object.classification);
+
   return true;
 }
 

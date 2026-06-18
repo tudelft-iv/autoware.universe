@@ -5,4 +5,5 @@
     map_frame: map
     buff_epoch: 1
     use_gnss_ins_orientation: true
+    publish_map_to_base_link_tf: false
     gnss_pose_pub_method: 0
